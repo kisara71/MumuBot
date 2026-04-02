@@ -43,7 +43,7 @@ func speakFunc(ctx context.Context, input *SpeakInput) (*SpeakOutput, error) {
 	}
 
 	// 通过回调发送消息，获取返回的消息ID
-	msgID, err := tc.SpeakCallback(ctx, tc.ConversationRef.GroupID, input.Content, input.ReplyTo, input.Mentions)
+	msgID, err := tc.SpeakCallback(ctx, tc.ConversationRef, input.Content, input.ReplyTo, input.Mentions)
 	if err != nil {
 		return &SpeakOutput{
 			Success: false,

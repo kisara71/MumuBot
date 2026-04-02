@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/llm"
 	"mumu-bot/internal/memory"
 	"strings"
@@ -184,7 +185,7 @@ func queryMemoryFunc(ctx context.Context, input *QueryMemoryInput) (*QueryMemory
 		limit = 50
 	}
 
-	ref := memory.AllConversationRef()
+	ref := conversation.AllConversationRef()
 	if input.Scoped {
 		ref = tc.ConversationRef
 	}

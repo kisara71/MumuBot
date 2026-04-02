@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,21 +76,21 @@ func (r *APIResponse) DataList() []interface{} {
 
 // Message 群消息
 type Message struct {
-	MessageID     int64            `json:"message_id"`
-	GroupID       int64            `json:"group_id"`
-	UserID        int64            `json:"user_id"`
-	Nickname      string           `json:"nickname"`
-	Content       string           `json:"content"`                 // 纯文本内容
-	IsMentioned   bool             `json:"is_mentioned"`            // 是否@机器人
-	Time          time.Time        `json:"time"`                    // 消息时间
-	MessageSource MessageSource    `json:"message_source"`          // 消息类型
-	Images        []ImageInfo      `json:"images,omitempty"`        // 图片列表
-	Videos        []VideoInfo      `json:"videos,omitempty"`        // 视频列表
-	Faces         []FaceInfo       `json:"faces,omitempty"`         // 表情列表
-	AtList        []int64          `json:"at_list,omitempty"`       // @的用户列表
-	Reply         *ReplyInfo       `json:"reply,omitempty"`         // 回复信息
-	Forwards      []ForwardMessage `json:"forwards,omitempty"`      // 合并转发内容
-	FinalContent  string           `json:"final_content,omitempty"` // 处理后的最终内容
+	MessageID     int64                      `json:"message_id"`
+	GroupID       int64                      `json:"group_id"`
+	UserID        int64                      `json:"user_id"`
+	Nickname      string                     `json:"nickname"`
+	Content       string                     `json:"content"`                 // 纯文本内容
+	IsMentioned   bool                       `json:"is_mentioned"`            // 是否@机器人
+	Time          time.Time                  `json:"time"`                    // 消息时间
+	MessageSource conversation.MessageSource `json:"message_source"`          // 消息类型
+	Images        []ImageInfo                `json:"images,omitempty"`        // 图片列表
+	Videos        []VideoInfo                `json:"videos,omitempty"`        // 视频列表
+	Faces         []FaceInfo                 `json:"faces,omitempty"`         // 表情列表
+	AtList        []int64                    `json:"at_list,omitempty"`       // @的用户列表
+	Reply         *ReplyInfo                 `json:"reply,omitempty"`         // 回复信息
+	Forwards      []ForwardMessage           `json:"forwards,omitempty"`      // 合并转发内容
+	FinalContent  string                     `json:"final_content,omitempty"` // 处理后的最终内容
 }
 
 // ImageInfo 图片信息
@@ -328,7 +329,7 @@ func (c *Client) handleMessageEvent(event map[string]interface{}) {
 	}
 
 	var msg *Message
-	switch MessageSource(msgSrc) {
+	switch conversation.MessageSource(msgSrc) {
 	case MessageSourceGroup:
 		msg = c.parseGroupMessage(event)
 	case MessageSourcePrivate:
@@ -1356,10 +1357,17 @@ func (c *Client) GetMessageReactions(ctx context.Context, messageID int64) ([]Em
 	return reactions, nil
 }
 
-// SendImageMessage 发送图片/表情包消息
-// filePath: 本地文件绝对路径
-// isSticker: true 时作为表情包发送 (sub_type=1)
-func (c *Client) SendImageMessage(ctx context.Context, groupID int64, filePath string, isSticker bool) (int64, error) {
+// SendGroupImageMessage 发送群图片/表情包消息。
+func (c *Client) SendGroupImageMessage(ctx context.Context, groupID int64, filePath string, isSticker bool) (int64, error) {
+	return c.sendImageMessage(ctx, "send_group_msg", "group_id", groupID, filePath, isSticker)
+}
+
+// SendPrivateImageMessage 发送私聊图片/表情包消息。
+func (c *Client) SendPrivateImageMessage(ctx context.Context, userID int64, filePath string, isSticker bool) (int64, error) {
+	return c.sendImageMessage(ctx, "send_private_msg", "user_id", userID, filePath, isSticker)
+}
+
+func (c *Client) sendImageMessage(ctx context.Context, action string, target string, targetID int64, filePath string, isSticker bool) (int64, error) {
 	subType := 0
 	if isSticker {
 		subType = 1
@@ -1375,9 +1383,9 @@ func (c *Client) SendImageMessage(ctx context.Context, groupID int64, filePath s
 		},
 	}
 
-	resp, err := c.callAPI(ctx, "send_group_msg", map[string]interface{}{
-		"group_id": groupID,
-		"message":  message,
+	resp, err := c.callAPI(ctx, action, map[string]interface{}{
+		target:    targetID,
+		"message": message,
 	})
 	if err != nil {
 		return 0, err

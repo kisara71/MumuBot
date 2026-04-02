@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/jargon"
 	"mumu-bot/internal/llm"
 	"mumu-bot/internal/memory"
@@ -211,7 +212,7 @@ func (l *Learner) processReview(groupID int64) {
 	ctx, cancel := context.WithTimeout(l.ctx, 60*time.Second)
 	defer cancel()
 	ctx = tools.WithLearningContext(ctx, &tools.LearningContext{
-		ConversationRef: memory.GroupConversationRef(groupID),
+		ConversationRef: conversation.GroupConversationRef(groupID),
 		MemMgr:          l.memMgr,
 		JargonMgr:       l.jargonMgr,
 	})
@@ -247,7 +248,7 @@ func (l *Learner) processGroup(groupID int64) {
 		batchSize = 100
 	}
 
-	msgs, err := l.memMgr.GetMessagesAfterID(memory.GroupConversationRef(groupID), cfg.Persona.QQ, state.LastMessageID, batchSize)
+	msgs, err := l.memMgr.GetMessagesAfterID(conversation.GroupConversationRef(groupID), cfg.Persona.QQ, state.LastMessageID, batchSize)
 	if err != nil {
 		zap.L().Error("获取消息失败", zap.Int64("group_id", groupID), zap.Error(err))
 		return
@@ -321,7 +322,7 @@ func (l *Learner) processGroup(groupID int64) {
 	ctx, cancel := context.WithTimeout(l.ctx, 90*time.Second)
 	defer cancel()
 	ctx = tools.WithLearningContext(ctx, &tools.LearningContext{
-		ConversationRef: memory.GroupConversationRef(groupID),
+		ConversationRef: conversation.GroupConversationRef(groupID),
 		MemMgr:          l.memMgr,
 		JargonMgr:       l.jargonMgr,
 	})

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/jargon"
 	"mumu-bot/internal/memory"
 	"mumu-bot/internal/onebot"
@@ -20,14 +21,14 @@ import (
 )
 
 // SpeakCallback 发言回调函数类型，返回消息ID
-type SpeakCallback func(ctx context.Context, groupID int64, content string, replyTo int64, mentions []int64) (int64, error)
+type SpeakCallback func(ctx context.Context, ref conversation.Ref, content string, replyTo int64, mentions []int64) (int64, error)
 
 // SendStickerCallback 发送表情包回调函数类型
-type SendStickerCallback func(ctx context.Context, groupID int64, filePath string, description string) (int64, error)
+type SendStickerCallback func(ctx context.Context, ref conversation.Ref, filePath string, description string) (int64, error)
 
 // ToolContext 工具执行上下文
 type ToolContext struct {
-	ConversationRef     memory.ConversationRef
+	ConversationRef     conversation.Ref
 	MemoryMgr           *memory.Manager
 	Bot                 *onebot.Client
 	SpeakCallback       SpeakCallback       // 发言回调
@@ -76,7 +77,7 @@ func (tc *ToolContext) MarkToolCallSeen(toolName string, arguments string) bool 
 
 // LearningContext 学习任务上下文
 type LearningContext struct {
-	ConversationRef memory.ConversationRef
+	ConversationRef conversation.Ref
 	MemMgr          *memory.Manager
 	JargonMgr       *jargon.Manager
 }

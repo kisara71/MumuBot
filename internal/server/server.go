@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/memory"
 	"net/http"
 	"strconv"
@@ -109,7 +110,7 @@ func (s *Server) listMemories(c *gin.Context) {
 	memType := c.DefaultQuery("type", "")
 	page, pageSize := parsePageParams(c)
 
-	memories, total, err := s.memoryMgr.ListMemoriesByConversation(memory.GroupConversationRef(groupID), memType, page, pageSize)
+	memories, total, err := s.memoryMgr.ListMemoriesByConversation(conversation.GroupConversationRef(groupID), memType, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -197,7 +198,7 @@ func (s *Server) listMessages(c *gin.Context) {
 	groupID, _ := strconv.ParseInt(c.DefaultQuery("group_id", "0"), 10, 64)
 	page, pageSize := parsePageParams(c)
 
-	messages, total, err := s.memoryMgr.ListMessageLogsByConversation(memory.GroupConversationRef(groupID), page, pageSize)
+	messages, total, err := s.memoryMgr.ListMessageLogsByConversation(conversation.GroupConversationRef(groupID), page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

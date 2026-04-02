@@ -1,6 +1,10 @@
 package memory
 
-import "gorm.io/gorm"
+import (
+	"mumu-bot/internal/conversation"
+
+	"gorm.io/gorm"
+)
 
 type ConversationScopeFields struct {
 	GroupField   string
@@ -12,7 +16,7 @@ var conversationFields = ConversationScopeFields{
 	PrivateField: "user_id",
 }
 
-func (ref ConversationRef) Scope(q *gorm.DB, fields ConversationScopeFields) *gorm.DB {
+func scopeConversation(ref conversation.Ref, q *gorm.DB, fields ConversationScopeFields) *gorm.DB {
 	switch {
 	case ref.IsGroup():
 		return q.Where(fields.GroupField+" = ?", ref.GroupID)
@@ -23,7 +27,7 @@ func (ref ConversationRef) Scope(q *gorm.DB, fields ConversationScopeFields) *go
 	}
 }
 
-func (ref ConversationRef) ScopeMessageLogs(q *gorm.DB) *gorm.DB {
+func scopeMessageLogs(ref conversation.Ref, q *gorm.DB) *gorm.DB {
 	switch {
 	case ref.IsGroup():
 		return q.Where("message_source = ? AND group_id = ?", ref.Source, ref.GroupID)

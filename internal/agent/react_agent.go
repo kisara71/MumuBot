@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/jargon"
 	"mumu-bot/internal/learning"
 	"mumu-bot/internal/llm"
@@ -82,9 +83,9 @@ func messageConversationRef(msg *onebot.Message) memory.ConversationRef {
 		return memory.AllConversationRef()
 	}
 	switch msg.MessageSource {
-	case onebot.MessageSourceGroup:
+	case conversation.MessageSourceGroup:
 		return memory.GroupConversationRef(msg.GroupID)
-	case onebot.MessageSourcePrivate:
+	case conversation.MessageSourcePrivate:
 		return memory.PrivateConversationRef(msg.UserID)
 	default:
 		return memory.AllConversationRef()
@@ -853,11 +854,11 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 		ConversationRef: ref,
 		MemoryMgr:       a.memory,
 		Bot:             a.bot,
-		SpeakCallback: func(callCtx context.Context, _ int64, content string, replyTo int64, mentions []int64) (int64, error) {
-			return a.doSpeak(callCtx, ref, content, replyTo, mentions)
+		SpeakCallback: func(callCtx context.Context, callRef conversation.Ref, content string, replyTo int64, mentions []int64) (int64, error) {
+			return a.doSpeak(callCtx, callRef, content, replyTo, mentions)
 		},
-		SendStickerCallback: func(callCtx context.Context, _ int64, filePath string, description string) (int64, error) {
-			return a.doSendSticker(callCtx, ref, filePath, description)
+		SendStickerCallback: func(callCtx context.Context, callRef conversation.Ref, filePath string, description string) (int64, error) {
+			return a.doSendSticker(callCtx, callRef, filePath, description)
 		},
 	})
 
@@ -1015,7 +1016,7 @@ func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationR
 		return local, nil
 	}
 
-	cross, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, memory.AllConversationRef(), memory.MemoryTypeSelfExperience, 4, threshold)
+	cross, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, conversation.AllConversationRef(), memory.MemoryTypeSelfExperience, 4, threshold)
 	if err != nil {
 		zap.L().Warn("跨会话自我经历检索失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return local, nil
@@ -1335,12 +1336,20 @@ func (a *Agent) doSpeak(ctx context.Context, ref memory.ConversationRef, content
 
 // doSendSticker 执行发送表情包，并记录消息
 func (a *Agent) doSendSticker(ctx context.Context, ref memory.ConversationRef, filePath string, description string) (int64, error) {
-	if !ref.IsGroup() {
-		return 0, fmt.Errorf("私聊暂不支持发送表情包")
+	var (
+		msgID int64
+		err   error
+	)
+	switch {
+	case ref.IsGroup():
+		msgID, err = a.bot.SendGroupImageMessage(ctx, ref.GroupID, filePath, true)
+	case ref.IsPrivate():
+		msgID, err = a.bot.SendPrivateImageMessage(ctx, ref.UserID, filePath, true)
+	default:
+		return 0, fmt.Errorf("无效的会话类型")
 	}
-	msgID, err := a.bot.SendImageMessage(ctx, ref.GroupID, filePath, true)
 	if err != nil {
-		zap.L().Error("发送表情包失败", zap.Int64("group_id", ref.GroupID), zap.String("path", filePath), zap.Error(err))
+		zap.L().Error("发送表情包失败", zap.String("ID", ref.ID()), zap.String("path", filePath), zap.Error(err))
 		return 0, err
 	}
 
@@ -1364,7 +1373,7 @@ func (a *Agent) doSendSticker(ctx context.Context, ref memory.ConversationRef, f
 		},
 	}
 	a.onMessage(msg)
-	zap.L().Info("发送表情包成功", zap.Int64("group_id", ref.GroupID), zap.String("desc", description))
+	zap.L().Info("发送表情包成功", zap.String("ID", ref.ID()), zap.String("desc", description))
 	return msgID, nil
 }
 

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"mumu-bot/internal/config"
-	"mumu-bot/internal/onebot"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/utils"
 	"mumu-bot/internal/vector"
 	"strings"
@@ -165,7 +165,7 @@ func (m *Manager) AddMessage(msg MessageLog) error {
 // GetRecentMessages 获取最近的消息记录
 func (m *Manager) GetRecentMessages(ref ConversationRef, limit, offset int) []MessageLog {
 	var dbMsgs []MessageLog
-	q := ref.ScopeMessageLogs(m.db.Model(&MessageLog{})).Order("created_at DESC").Limit(limit)
+	q := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).Order("created_at DESC").Limit(limit)
 	if offset > 0 {
 		q = q.Offset(offset)
 	}
@@ -178,7 +178,7 @@ func (m *Manager) GetRecentMessages(ref ConversationRef, limit, offset int) []Me
 // GetMessagesAfterID 获取指定消息ID之后的消息
 func (m *Manager) GetMessagesAfterID(ref ConversationRef, selfID int64, lastID uint, limit int) ([]MessageLog, error) {
 	var dbMsgs []MessageLog
-	q := ref.ScopeMessageLogs(m.db.Model(&MessageLog{})).
+	q := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).
 		Where("id > ? AND user_id != ?", lastID, selfID).
 		Order("id ASC")
 	if limit > 0 {
@@ -191,7 +191,7 @@ func (m *Manager) GetMessagesAfterID(ref ConversationRef, selfID int64, lastID u
 // GetMessageCountByTime 获取指定用户在指定作用域一段时间内的消息数量
 func (m *Manager) GetMessageCountByTime(ref ConversationRef, userID int64, startTime time.Time) (int64, error) {
 	var count int64
-	err := ref.ScopeMessageLogs(m.db.Model(&MessageLog{})).
+	err := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).
 		Where("user_id = ? AND created_at >= ?", userID, startTime).
 		Count(&count).Error
 	return count, err
@@ -294,7 +294,7 @@ func (m *Manager) QueryMemoryByConversation(ctx context.Context, query string, r
 
 	// 回退到关键词搜索
 	var memories []Memory
-	q := ref.Scope(m.db.Model(&Memory{}), conversationFields)
+	q := scopeConversation(ref, m.db.Model(&Memory{}), conversationFields)
 	if memType != "" {
 		q = q.Where("type = ?", memType)
 	}
@@ -384,17 +384,17 @@ func (m *Manager) cleanupMessageLogs(keepLatest int) {
 
 	for _, scope := range scopes {
 		ref := AllConversationRef()
-		switch onebot.MessageSource(scope.MessageSource) {
-		case onebot.MessageSourceGroup:
+		switch conversation.MessageSource(scope.MessageSource) {
+		case conversation.MessageSourceGroup:
 			ref = GroupConversationRef(scope.GroupID)
-		case onebot.MessageSourcePrivate:
+		case conversation.MessageSourcePrivate:
 			ref = PrivateConversationRef(scope.UserID)
 		default:
 			continue
 		}
 
 		var keepIDs []uint
-		if err := ref.ScopeMessageLogs(m.db.Model(&MessageLog{})).
+		if err := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).
 			Order("created_at DESC").
 			Limit(keepLatest).
 			Pluck("id", &keepIDs).Error; err != nil {
@@ -405,7 +405,7 @@ func (m *Manager) cleanupMessageLogs(keepLatest int) {
 			continue
 		}
 
-		result := ref.ScopeMessageLogs(m.db.Where("id NOT IN ?", keepIDs)).Delete(&MessageLog{})
+		result := scopeMessageLogs(ref, m.db.Where("id NOT IN ?", keepIDs)).Delete(&MessageLog{})
 		if result.Error != nil {
 			zap.L().Warn("清理消息日志失败：删除旧记录失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(result.Error))
 			continue
@@ -764,7 +764,7 @@ func mergeStyleCardSourceExcerpt(existing, candidate string) string {
 // SearchJargons 搜索黑话（通过关键词匹配，本群优先）
 func (m *Manager) SearchJargonsByConversation(ref ConversationRef, keyword string, limit int) ([]Jargon, error) {
 	var jargons []Jargon
-	q := ref.Scope(m.db.Model(&Jargon{}).Where("rejected = ?", false), conversationFields)
+	q := scopeConversation(ref, m.db.Model(&Jargon{}).Where("rejected = ?", false), conversationFields)
 
 	// 使用 strings.Fields 切割关键词，挨个模糊匹配
 	if keyword != "" {
@@ -792,7 +792,7 @@ func (m *Manager) SearchJargonsByConversation(ref ConversationRef, keyword strin
 // SaveJargon 保存黑话/术语
 func (m *Manager) SaveJargon(jargon *Jargon) error {
 	var existing Jargon
-	q := conversationRefFromJargon(jargon).Scope(m.db.Model(&Jargon{}), conversationFields).Where("content = ?", jargon.Content)
+	q := scopeConversation(conversationRefFromJargon(jargon), m.db.Model(&Jargon{}), conversationFields).Where("content = ?", jargon.Content)
 	err := q.First(&existing).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -842,7 +842,7 @@ func (m *Manager) BatchReviewJargon(ids []uint, approve bool) error {
 // GetUncheckedJargons 获取待审核的黑话
 func (m *Manager) GetUncheckedJargonsByConversation(ref ConversationRef, limit int) ([]Jargon, error) {
 	var jargons []Jargon
-	err := ref.Scope(m.db.Model(&Jargon{}), conversationFields).
+	err := scopeConversation(ref, m.db.Model(&Jargon{}), conversationFields).
 		Where("checked = ?", false).
 		Limit(limit).
 		Find(&jargons).Error
@@ -935,7 +935,7 @@ func (m *Manager) ListMemoriesByConversation(ref ConversationRef, memType string
 	var items []Memory
 	var total int64
 
-	q := ref.Scope(m.db.Model(&Memory{}), conversationFields)
+	q := scopeConversation(ref, m.db.Model(&Memory{}), conversationFields)
 	if memType != "" {
 		q = q.Where("type = ?", memType)
 	}
@@ -960,7 +960,7 @@ func (m *Manager) ListMessageLogsByConversation(ref ConversationRef, page, pageS
 	var items []MessageLog
 	var total int64
 
-	q := ref.ScopeMessageLogs(m.db.Model(&MessageLog{}))
+	q := scopeMessageLogs(ref, m.db.Model(&MessageLog{}))
 	q.Count(&total)
 
 	err := q.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error

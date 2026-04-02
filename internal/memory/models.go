@@ -1,44 +1,22 @@
 package memory
 
 import (
-	"fmt"
-	"mumu-bot/internal/onebot"
+	"mumu-bot/internal/conversation"
 	"time"
 )
 
-type ConversationRef struct {
-	Source  onebot.MessageSource `json:"source"`
-	GroupID int64                `json:"group_id,omitempty"`
-	UserID  int64                `json:"user_id,omitempty"`
-}
+type ConversationRef = conversation.Ref
 
 func AllConversationRef() ConversationRef {
-	return ConversationRef{}
+	return conversation.AllConversationRef()
 }
 
 func GroupConversationRef(groupID int64) ConversationRef {
-	return ConversationRef{Source: onebot.MessageSourceGroup, GroupID: groupID}
+	return conversation.GroupConversationRef(groupID)
 }
 
 func PrivateConversationRef(userID int64) ConversationRef {
-	return ConversationRef{Source: onebot.MessageSourcePrivate, UserID: userID}
-}
-func (ref ConversationRef) IsGroup() bool {
-	return ref.Source == onebot.MessageSourceGroup && ref.GroupID > 0
-}
-
-func (ref ConversationRef) IsPrivate() bool {
-	return ref.Source == onebot.MessageSourcePrivate && ref.UserID > 0
-}
-
-func (ref ConversationRef) ID() string {
-	if ref.IsGroup() {
-		return fmt.Sprintf("group_%d", ref.GroupID)
-	}
-	if ref.IsPrivate() {
-		return fmt.Sprintf("private_%d", ref.UserID)
-	}
-	return ""
+	return conversation.PrivateConversationRef(userID)
 }
 
 // MemoryType 记忆类型
