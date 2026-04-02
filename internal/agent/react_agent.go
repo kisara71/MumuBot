@@ -355,10 +355,9 @@ func (a *Agent) loadMessages(ref memory.ConversationRef, bufSize int, logs []mem
 		return
 	}
 	// 初始化缓冲区
-	key := conversationKey(ref)
 	a.buffersMu.Lock()
 	buf := utils.NewRingBuffer[*onebot.Message](bufSize)
-	a.buffers[key] = buf
+	a.buffers[ref.ID()] = buf
 	// 填充缓冲区
 	for _, log := range logs {
 		msgID, _ := strconv.ParseInt(log.MessageID, 10, 64)
@@ -576,14 +575,13 @@ func (a *Agent) parseMessageContent(msg *onebot.Message) string {
 
 func (a *Agent) addBuffer(msg *onebot.Message) {
 	ref := messageConversationRef(msg)
-	if ref.ID() == 0 {
+	if ref.ID() == "" {
 		zap.L().Error("消息缺少有效会话信息", zap.Any("msg", msg))
 		return
 	}
-	key := conversationKey(ref)
 	a.buffersMu.Lock()
 	defer a.buffersMu.Unlock()
-	buf, ok := a.buffers[key]
+	buf, ok := a.buffers[ref.ID()]
 	if !ok {
 		bufSize := config.Get().Agent.MessageBufferSizeGroup
 		if ref.IsPrivate() {
@@ -595,13 +593,13 @@ func (a *Agent) addBuffer(msg *onebot.Message) {
 			bufSize = 15
 		}
 		buf = utils.NewRingBuffer[*onebot.Message](bufSize)
-		a.buffers[key] = buf
+		a.buffers[ref.ID()] = buf
 	}
 	buf.Push(msg)
 }
 func (a *Agent) getBuffer(ref memory.ConversationRef) []*onebot.Message {
 	a.buffersMu.RLock()
-	buf, ok := a.buffers[conversationKey(ref)]
+	buf, ok := a.buffers[ref.ID()]
 	a.buffersMu.RUnlock()
 
 	if !ok || buf.IsEmpty() {
@@ -657,7 +655,7 @@ func (a *Agent) thinkCycle() {
 
 		// 如果该消息的时间不晚于最后处理时间，说明是旧消息，跳过
 		a.processingMu.RLock()
-		lastTime := a.lastProcessedTime[conversationKey(ref)]
+		lastTime := a.lastProcessedTime[ref.ID()]
 		a.processingMu.RUnlock()
 		if !lastTime.IsZero() && lastMsg.Time.Before(lastTime) {
 			continue
@@ -687,11 +685,10 @@ func (a *Agent) thinkCycle() {
 
 func (a *Agent) scheduleThink(ref memory.ConversationRef, isMention bool, fromLoop bool) {
 	debounce := time.Duration(config.Get().Agent.ThinkDebounceMS) * time.Millisecond
-	key := conversationKey(ref)
 
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
-	if pending, ok := a.pendingThinks[key]; ok {
+	if pending, ok := a.pendingThinks[ref.ID()]; ok {
 		pending.isMention = pending.isMention || isMention
 		pending.generation++
 		gen := pending.generation
@@ -713,20 +710,19 @@ func (a *Agent) scheduleThink(ref memory.ConversationRef, isMention bool, fromLo
 	pending.timer = time.AfterFunc(debounce, func() {
 		a.flushPendingThink(ref, gen)
 	})
-	a.pendingThinks[key] = pending
+	a.pendingThinks[ref.ID()] = pending
 }
 
 func (a *Agent) flushPendingThink(ref memory.ConversationRef, generation uint64) {
-	key := conversationKey(ref)
 	a.pendingMu.Lock()
-	pending, ok := a.pendingThinks[key]
+	pending, ok := a.pendingThinks[ref.ID()]
 	if !ok || pending.generation != generation {
 		a.pendingMu.Unlock()
 		return
 	}
 
 	isMention := pending.isMention
-	delete(a.pendingThinks, key)
+	delete(a.pendingThinks, ref.ID())
 	a.pendingMu.Unlock()
 
 	a.concurrencyMgr.Submit(ref, isMention)
@@ -815,7 +811,7 @@ func (a *Agent) getSpeakProbability(ref memory.ConversationRef) float64 {
 			if decay < 1.0 {
 				zap.L().Debug("触发防话痨限制",
 					zap.String("source", string(ref.Source)),
-					zap.Int64("id", ref.ID()),
+					zap.String("id", ref.ID()),
 					zap.Int64("recent_msgs", count),
 					zap.Float64("decay", decay),
 					zap.Float64("original_prob", oldProb),
@@ -835,26 +831,25 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 	if ref.IsGroup() && a.bot.IsSelfMuted(ref.GroupID) {
 		return
 	}
-	key := conversationKey(ref)
 	// 并发锁：确保同一时间一个群只有一个思考进程
+	refID := ref.ID()
 	a.processingMu.Lock()
-	if a.processing[key] {
+	if a.processing[refID] {
 		a.processingMu.Unlock()
 		return
 	}
-	a.processing[key] = true
-	lastProcessedTime := a.lastProcessedTime[key]
-	a.lastProcessedTime[key] = time.Now()
+	a.processing[refID] = true
+	lastProcessedTime := a.lastProcessedTime[refID]
+	a.lastProcessedTime[refID] = time.Now()
 	a.processingMu.Unlock()
 
 	defer func() {
 		a.processingMu.Lock()
-		a.processing[key] = false
+		a.processing[refID] = false
 		a.processingMu.Unlock()
 	}()
 
 	ctx := tools.WithToolContext(a.ctx, &tools.ToolContext{
-		GroupID:         ref.GroupID,
 		ConversationRef: ref,
 		MemoryMgr:       a.memory,
 		Bot:             a.bot,
@@ -945,17 +940,17 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 	if err != nil {
 		// 区分是超时还是主动取消（stayQuiet）
 		if errors.Is(ctxWithTimeout.Err(), context.DeadlineExceeded) {
-			zap.L().Warn("思考超时", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Duration("timeout", agentThinkTimeout))
+			zap.L().Warn("思考超时", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Duration("timeout", agentThinkTimeout))
 		} else if errors.Is(ctxWithTimeout.Err(), context.Canceled) || errors.Is(a.ctx.Err(), context.Canceled) {
-			zap.L().Debug("思考已取消", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()))
+			zap.L().Debug("思考已取消", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()))
 		} else {
-			zap.L().Error("思考失败", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Error(err))
+			zap.L().Error("思考失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		}
 	}
 
 	// 记录 Agent 输出
 	if config.Get().Debug.ShowThinking && result != nil && result.Content != "" {
-		zap.L().Debug("Agent 输出", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.String("content", result.Content))
+		zap.L().Debug("Agent 输出", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.String("content", result.Content))
 	}
 }
 
@@ -1005,7 +1000,7 @@ func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationR
 
 	local, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, ref, "", 4, threshold)
 	if err != nil {
-		zap.L().Warn("主动记忆检索失败", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Error(err))
+		zap.L().Warn("主动记忆检索失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return nil, nil
 	}
 
@@ -1022,7 +1017,7 @@ func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationR
 
 	cross, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, memory.AllConversationRef(), memory.MemoryTypeSelfExperience, 4, threshold)
 	if err != nil {
-		zap.L().Warn("跨会话自我经历检索失败", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Error(err))
+		zap.L().Warn("跨会话自我经历检索失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return local, nil
 	}
 
@@ -1320,7 +1315,7 @@ func (a *Agent) doSpeak(ctx context.Context, ref memory.ConversationRef, content
 		return 0, fmt.Errorf("无效的会话类型")
 	}
 	if err != nil {
-		zap.L().Error("发言失败", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Error(err))
+		zap.L().Error("发言失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return 0, err
 	}
 
@@ -1334,7 +1329,7 @@ func (a *Agent) doSpeak(ctx context.Context, ref memory.ConversationRef, content
 		MessageSource: ref.Source,
 	}
 	a.onMessage(msg)
-	zap.L().Info("发言成功", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.String("content", content))
+	zap.L().Info("发言成功", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.String("content", content))
 	return msgID, nil
 }
 

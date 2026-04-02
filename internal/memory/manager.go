@@ -22,10 +22,10 @@ type EmbeddingProvider interface {
 }
 
 type vectorStore interface {
-	Insert(ctx context.Context, memoryID uint, groupID int64, memType string, embedding []float64) (int64, error)
-	Search(ctx context.Context, embedding []float64, groupID int64, memType string, topK int, threshold float64) ([]vector.SearchResult, error)
+	Insert(ctx context.Context, memoryID uint, refID string, memType string, embedding []float64) (int64, error)
+	Search(ctx context.Context, embedding []float64, refID string, memType string, topK int, threshold float64) ([]vector.SearchResult, error)
 	Delete(ctx context.Context, memoryIDs []uint) error
-	DeleteByGroup(ctx context.Context, groupID int64) error
+	DeleteByRef(ctx context.Context, refID string) error
 	Close() error
 	GetConfig() *vector.MilvusConfig
 }
@@ -214,7 +214,7 @@ func (m *Manager) SearchSimilarMemoriesByConversation(ctx context.Context, text 
 		return nil, err
 	}
 
-	results, err := m.milvusVectorSearch(ctx, emb, ref.GroupID, string(memType), limit, threshold)
+	results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), string(memType), limit, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +237,7 @@ func (m *Manager) UpdateMemoryContent(ctx context.Context, id uint, newContent s
 		if err == nil {
 			var mem Memory
 			if err := m.db.First(&mem, id).Error; err == nil {
-				_, _ = m.milvus.Insert(ctx, id, mem.GroupID, string(mem.Type), emb)
+				_, _ = m.milvus.Insert(ctx, id, mem.ConversationID, string(mem.Type), emb)
 			}
 		}
 	}
@@ -272,7 +272,7 @@ func (m *Manager) SaveMemory(ctx context.Context, mem *Memory) error {
 
 	// 保存向量到 Milvus
 	if m.milvus != nil && len(embedding) > 0 {
-		if _, err := m.milvus.Insert(ctx, mem.ID, mem.GroupID, string(mem.Type), embedding); err != nil {
+		if _, err := m.milvus.Insert(ctx, mem.ID, mem.ConversationID, string(mem.Type), embedding); err != nil {
 			// 向量插入失败只记录日志，不影响主流程
 			zap.L().Error("Milvus 插入向量失败", zap.Error(err))
 		}
@@ -286,7 +286,7 @@ func (m *Manager) QueryMemoryByConversation(ctx context.Context, query string, r
 	// 尝试 Milvus 向量搜索
 	if m.milvus != nil && m.embedding != nil {
 		if emb, err := m.embedding.Embed(ctx, query); err == nil {
-			if results, err := m.milvusVectorSearch(ctx, emb, ref.GroupID, string(memType), limit, 0.7); err == nil && len(results) > 0 {
+			if results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), string(memType), limit, 0.7); err == nil && len(results) > 0 {
 				return results, nil
 			}
 		}
@@ -398,7 +398,7 @@ func (m *Manager) cleanupMessageLogs(keepLatest int) {
 			Order("created_at DESC").
 			Limit(keepLatest).
 			Pluck("id", &keepIDs).Error; err != nil {
-			zap.L().Warn("清理消息日志失败：获取保留ID失败", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Error(err))
+			zap.L().Warn("清理消息日志失败：获取保留ID失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 			continue
 		}
 		if len(keepIDs) == 0 {
@@ -407,18 +407,18 @@ func (m *Manager) cleanupMessageLogs(keepLatest int) {
 
 		result := ref.ScopeMessageLogs(m.db.Where("id NOT IN ?", keepIDs)).Delete(&MessageLog{})
 		if result.Error != nil {
-			zap.L().Warn("清理消息日志失败：删除旧记录失败", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Error(result.Error))
+			zap.L().Warn("清理消息日志失败：删除旧记录失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(result.Error))
 			continue
 		}
 		if result.RowsAffected > 0 {
-			zap.L().Info("消息日志已清理", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()), zap.Int("deleted", int(result.RowsAffected)))
+			zap.L().Info("消息日志已清理", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Int("deleted", int(result.RowsAffected)))
 		}
 	}
 }
 
 // milvusVectorSearch 使用 Milvus 进行向量搜索并返回完整的 Memory 对象
-func (m *Manager) milvusVectorSearch(ctx context.Context, queryEmb []float64, groupID int64, memType string, limit int, threshold float64) ([]Memory, error) {
-	results, err := m.milvus.Search(ctx, queryEmb, groupID, memType, limit, threshold)
+func (m *Manager) milvusVectorSearch(ctx context.Context, queryEmb []float64, refID string, memType string, limit int, threshold float64) ([]Memory, error) {
+	results, err := m.milvus.Search(ctx, queryEmb, refID, memType, limit, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +494,7 @@ func (m *Manager) SaveStyleCardCandidate(ctx context.Context, card *StyleCard) (
 	searchResults, err := m.styleCardMilvus.Search(
 		ctx,
 		embedding,
-		card.GroupID,
+		card.ConversationID,
 		styleCardVectorKey(card.Intent, card.Tone),
 		3,
 		0.92,
@@ -690,7 +690,7 @@ func (m *Manager) insertStyleCardVector(ctx context.Context, card *StyleCard, em
 	if card == nil || m.styleCardMilvus == nil {
 		return nil
 	}
-	if _, err := m.styleCardMilvus.Insert(ctx, card.ID, card.GroupID, styleCardVectorKey(card.Intent, card.Tone), embedding); err != nil {
+	if _, err := m.styleCardMilvus.Insert(ctx, card.ID, card.ConversationID, styleCardVectorKey(card.Intent, card.Tone), embedding); err != nil {
 		return fmt.Errorf("插入风格卡片向量失败: %w", err)
 	}
 	return nil

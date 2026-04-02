@@ -101,8 +101,9 @@ func (c *MilvusClient) initCollection(ctx context.Context) error {
 				WithName("memory_id").
 				WithDataType(entity.FieldTypeInt64)).
 			WithField(entity.NewField().
-				WithName("group_id").
-				WithDataType(entity.FieldTypeInt64)).
+				WithName("conversation_id").
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(32)).
 			WithField(entity.NewField().
 				WithName("mem_type").
 				WithDataType(entity.FieldTypeVarChar).
@@ -144,7 +145,7 @@ func (c *MilvusClient) initCollection(ctx context.Context) error {
 }
 
 // Insert 插入向量
-func (c *MilvusClient) Insert(ctx context.Context, memoryID uint, groupID int64, memType string, embedding []float64) (int64, error) {
+func (c *MilvusClient) Insert(ctx context.Context, memoryID uint, refID string, memType string, embedding []float64) (int64, error) {
 	// 转换 float64 到 float32
 	emb32 := make([]float32, len(embedding))
 	for i, v := range embedding {
@@ -153,12 +154,12 @@ func (c *MilvusClient) Insert(ctx context.Context, memoryID uint, groupID int64,
 
 	// 准备数据
 	memoryIDCol := column.NewColumnInt64("memory_id", []int64{int64(memoryID)})
-	groupIDCol := column.NewColumnInt64("group_id", []int64{groupID})
+	refIDCol := column.NewColumnString("conversation_id", []string{refID})
 	memTypeCol := column.NewColumnVarChar("mem_type", []string{memType})
 	embeddingCol := column.NewColumnFloatVector("embedding", c.cfg.VectorDim, [][]float32{emb32})
 
 	// 插入
-	result, err := c.client.Insert(ctx, milvusclient.NewColumnBasedInsertOption(c.collectionName, memoryIDCol, groupIDCol, memTypeCol, embeddingCol))
+	result, err := c.client.Insert(ctx, milvusclient.NewColumnBasedInsertOption(c.collectionName, memoryIDCol, refIDCol, memTypeCol, embeddingCol))
 	if err != nil {
 		return 0, fmt.Errorf("插入向量失败: %w", err)
 	}
@@ -179,7 +180,7 @@ type SearchResult struct {
 }
 
 // Search 向量搜索
-func (c *MilvusClient) Search(ctx context.Context, embedding []float64, groupID int64, memType string, topK int, threshold float64) ([]SearchResult, error) {
+func (c *MilvusClient) Search(ctx context.Context, embedding []float64, refID string, memType string, topK int, threshold float64) ([]SearchResult, error) {
 	// 转换 float64 到 float32
 	emb32 := make([]float32, len(embedding))
 	for i, v := range embedding {
@@ -188,8 +189,8 @@ func (c *MilvusClient) Search(ctx context.Context, embedding []float64, groupID 
 
 	// 构建过滤条件
 	var filterParts []string
-	if groupID != 0 {
-		filterParts = append(filterParts, fmt.Sprintf("group_id == %d", groupID))
+	if refID != "" {
+		filterParts = append(filterParts, fmt.Sprintf("conversation_id == %s", refID))
 	}
 	if memType != "" {
 		filterParts = append(filterParts, fmt.Sprintf("mem_type == \"%s\"", memType))
@@ -265,8 +266,8 @@ func (c *MilvusClient) Delete(ctx context.Context, memoryIDs []uint) error {
 }
 
 // DeleteByGroup 按群删除向量
-func (c *MilvusClient) DeleteByGroup(ctx context.Context, groupID int64) error {
-	filter := fmt.Sprintf("group_id == %d", groupID)
+func (c *MilvusClient) DeleteByRef(ctx context.Context, refID string) error {
+	filter := fmt.Sprintf("conversation_id == %s", refID)
 	_, err := c.client.Delete(ctx, milvusclient.NewDeleteOption(c.collectionName).WithExpr(filter))
 	if err != nil {
 		return fmt.Errorf("按群删除向量失败: %w", err)

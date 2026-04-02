@@ -116,7 +116,7 @@ func sendStickerFunc(ctx context.Context, input *SendStickerInput) (*SendSticker
 	}
 
 	// 发送表情包（使用回调以记录消息）
-	msgID, err := tc.SendStickerCallback(ctx, tc.GroupID, filePath, sticker.Description)
+	msgID, err := tc.SendStickerCallback(ctx, tc.ConversationRef.GroupID, filePath, sticker.Description)
 	if err != nil {
 		return &SendStickerOutput{Success: false, Message: err.Error()}, nil
 	}

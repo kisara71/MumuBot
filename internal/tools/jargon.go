@@ -67,7 +67,7 @@ func saveJargonFunc(ctx context.Context, input *SaveJargonInput) (*SaveJargonOut
 	}
 
 	// 新建黑话
-	groupID := lc.GroupID
+	groupID := lc.ConversationRef.GroupID
 	userID := int64(0)
 	if lc.ConversationRef.IsPrivate() {
 		groupID = 0
@@ -151,7 +151,7 @@ func searchJargonFunc(ctx context.Context, input *SearchJargonInput) (*SearchJar
 			"meaning":            j.Meaning,
 			"context":            j.Context,
 			"checked":            j.Checked,
-			"from_current_group": j.GroupID == tc.GroupID,
+			"from_current_group": j.GroupID == tc.ConversationRef.GroupID,
 		})
 	}
 

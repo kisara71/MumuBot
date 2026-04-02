@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"mumu-bot/internal/memory"
-	"strconv"
 	"sync"
 
 	"go.uber.org/zap"
@@ -51,9 +50,8 @@ func (m *ConcurrencyManager) Submit(ref memory.ConversationRef, isMention bool) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	key := conversationKey(ref)
-	if m.inQueue[key] {
-		zap.L().Debug("任务已在队列中，跳过", zap.String("source", string(ref.Source)), zap.Int64("id", ref.ID()))
+	if m.inQueue[ref.ID()] {
+		zap.L().Debug("任务已在队列中，跳过", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()))
 		return
 	}
 
@@ -63,10 +61,10 @@ func (m *ConcurrencyManager) Submit(ref memory.ConversationRef, isMention bool) 
 			Ref:       ref,
 			IsMention: isMention,
 		})
-		m.inQueue[key] = true
+		m.inQueue[ref.ID()] = true
 		zap.L().Debug("并发已满，任务进入队列",
 			zap.String("source", string(ref.Source)),
-			zap.Int64("id", ref.ID()),
+			zap.String("id", ref.ID()),
 			zap.Int("current", m.currentRunning),
 			zap.Int("queue_len", len(m.queue)))
 		return
@@ -102,13 +100,13 @@ func (m *ConcurrencyManager) Finish() {
 		// 取出队首任务
 		task := m.queue[0]
 		m.queue = m.queue[1:]
-		delete(m.inQueue, conversationKey(task.Ref))
+		delete(m.inQueue, task.Ref.ID())
 
 		// 立即启动
 		m.currentRunning++
 		m.wg.Add(1)
 		go m.execute(task.Ref, task.IsMention)
-		zap.L().Debug("从队列调度任务执行", zap.String("source", string(task.Ref.Source)), zap.Int64("id", task.Ref.ID()))
+		zap.L().Debug("从队列调度任务执行", zap.String("source", string(task.Ref.Source)), zap.String("id", task.Ref.ID()))
 	}
 }
 
@@ -124,8 +122,4 @@ func (m *ConcurrencyManager) Close() {
 	m.mu.Unlock()
 
 	m.wg.Wait()
-}
-
-func conversationKey(ref memory.ConversationRef) string {
-	return string(ref.Source) + ":" + strconv.FormatInt(ref.ID(), 10)
 }

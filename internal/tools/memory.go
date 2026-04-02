@@ -106,7 +106,7 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 	}
 
 	// 如果没有相似记忆或合并失败，直接保存新记忆
-	groupID := tc.GroupID
+	groupID := tc.ConversationRef.GroupID
 	userID := input.RelatedUserID
 	if tc.ConversationRef.IsPrivate() {
 		groupID = 0
@@ -115,11 +115,12 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 		}
 	}
 	mem := &memory.Memory{
-		Type:       memory.MemoryType(input.Type),
-		GroupID:    groupID,
-		UserID:     userID,
-		Content:    input.Content,
-		Importance: input.Importance,
+		ConversationID: GetConversationID(ctx),
+		Type:           memory.MemoryType(input.Type),
+		GroupID:        groupID,
+		UserID:         userID,
+		Content:        input.Content,
+		Importance:     input.Importance,
 	}
 
 	if err := tc.MemoryMgr.SaveMemory(ctx, mem); err != nil {

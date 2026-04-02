@@ -211,7 +211,6 @@ func (l *Learner) processReview(groupID int64) {
 	ctx, cancel := context.WithTimeout(l.ctx, 60*time.Second)
 	defer cancel()
 	ctx = tools.WithLearningContext(ctx, &tools.LearningContext{
-		GroupID:         groupID,
 		ConversationRef: memory.GroupConversationRef(groupID),
 		MemMgr:          l.memMgr,
 		JargonMgr:       l.jargonMgr,
@@ -322,7 +321,6 @@ func (l *Learner) processGroup(groupID int64) {
 	ctx, cancel := context.WithTimeout(l.ctx, 90*time.Second)
 	defer cancel()
 	ctx = tools.WithLearningContext(ctx, &tools.LearningContext{
-		GroupID:         groupID,
 		ConversationRef: memory.GroupConversationRef(groupID),
 		MemMgr:          l.memMgr,
 		JargonMgr:       l.jargonMgr,

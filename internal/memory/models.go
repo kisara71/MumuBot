@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"mumu-bot/internal/onebot"
 	"time"
 )
@@ -22,7 +23,6 @@ func GroupConversationRef(groupID int64) ConversationRef {
 func PrivateConversationRef(userID int64) ConversationRef {
 	return ConversationRef{Source: onebot.MessageSourcePrivate, UserID: userID}
 }
-
 func (ref ConversationRef) IsGroup() bool {
 	return ref.Source == onebot.MessageSourceGroup && ref.GroupID > 0
 }
@@ -31,14 +31,14 @@ func (ref ConversationRef) IsPrivate() bool {
 	return ref.Source == onebot.MessageSourcePrivate && ref.UserID > 0
 }
 
-func (ref ConversationRef) ID() int64 {
+func (ref ConversationRef) ID() string {
 	if ref.IsGroup() {
-		return ref.GroupID
+		return fmt.Sprintf("group_%d", ref.GroupID)
 	}
 	if ref.IsPrivate() {
-		return ref.UserID
+		return fmt.Sprintf("private_%d", ref.UserID)
 	}
-	return 0
+	return ""
 }
 
 // MemoryType 记忆类型
@@ -53,16 +53,16 @@ const (
 // Memory 长期记忆
 // TODO
 type Memory struct {
-	ID        uint      `gorm:"primarykey" json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-
-	Type        MemoryType `gorm:"type:varchar(50);index" json:"type"`
-	GroupID     int64      `gorm:"index" json:"group_id"`
-	UserID      int64      `gorm:"index" json:"user_id,omitempty"`
-	Content     string     `gorm:"type:text" json:"content"`
-	Importance  float64    `gorm:"default:0.5" json:"importance"`
-	AccessCount int        `gorm:"default:0" json:"access_count"`
+	ID             uint       `gorm:"primarykey" json:"id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	ConversationID string     `gorm:"type:varchar(32);index" json:"conversation_id"`
+	Type           MemoryType `gorm:"type:varchar(50);index" json:"type"`
+	GroupID        int64      `gorm:"index" json:"group_id"`
+	UserID         int64      `gorm:"index" json:"user_id,omitempty"`
+	Content        string     `gorm:"type:text" json:"content"`
+	Importance     float64    `gorm:"default:0.5" json:"importance"`
+	AccessCount    int        `gorm:"default:0" json:"access_count"`
 }
 
 func (Memory) TableName() string { return "memories" }
@@ -156,21 +156,21 @@ const (
 
 // StyleCard 群风格卡片
 type StyleCard struct {
-	ID        uint      `gorm:"primarykey" json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-
-	GroupID       int64           `gorm:"index" json:"group_id"`
-	Intent        string          `gorm:"type:varchar(32);index" json:"intent"`
-	Tone          string          `gorm:"type:varchar(32);index" json:"tone"`
-	TriggerRule   string          `gorm:"type:varchar(255)" json:"trigger_rule"`
-	AvoidRule     string          `gorm:"type:varchar(255)" json:"avoid_rule"`
-	Example       string          `gorm:"type:varchar(255)" json:"example"`
-	SourceExcerpt string          `gorm:"type:text" json:"source_excerpt"`
-	Status        StyleCardStatus `gorm:"type:varchar(20);index;default:'candidate'" json:"status"`
-	EvidenceCount int             `gorm:"default:1" json:"evidence_count"`
-	UseCount      int             `gorm:"default:0" json:"use_count"`
-	LastUsedAt    *time.Time      `json:"last_used_at,omitempty"`
+	ID             uint            `gorm:"primarykey" json:"id"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	ConversationID string          `gorm:"type:varchar(32);index" json:"conversation_id"`
+	GroupID        int64           `gorm:"index" json:"group_id"`
+	Intent         string          `gorm:"type:varchar(32);index" json:"intent"`
+	Tone           string          `gorm:"type:varchar(32);index" json:"tone"`
+	TriggerRule    string          `gorm:"type:varchar(255)" json:"trigger_rule"`
+	AvoidRule      string          `gorm:"type:varchar(255)" json:"avoid_rule"`
+	Example        string          `gorm:"type:varchar(255)" json:"example"`
+	SourceExcerpt  string          `gorm:"type:text" json:"source_excerpt"`
+	Status         StyleCardStatus `gorm:"type:varchar(20);index;default:'candidate'" json:"status"`
+	EvidenceCount  int             `gorm:"default:1" json:"evidence_count"`
+	UseCount       int             `gorm:"default:0" json:"use_count"`
+	LastUsedAt     *time.Time      `json:"last_used_at,omitempty"`
 }
 
 var styleCardTableName = "style_cards"
