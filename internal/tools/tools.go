@@ -26,8 +26,10 @@ type SpeakCallback func(ctx context.Context, groupID int64, content string, repl
 type SendStickerCallback func(ctx context.Context, groupID int64, filePath string, description string) (int64, error)
 
 // ToolContext 工具执行上下文
+// TODO
 type ToolContext struct {
 	GroupID             int64
+	ConversationRef     memory.ConversationRef
 	MemoryMgr           *memory.Manager
 	Bot                 *onebot.Client
 	SpeakCallback       SpeakCallback       // 发言回调
@@ -76,9 +78,10 @@ func (tc *ToolContext) MarkToolCallSeen(toolName string, arguments string) bool 
 
 // LearningContext 学习任务上下文
 type LearningContext struct {
-	GroupID   int64
-	MemMgr    *memory.Manager
-	JargonMgr *jargon.Manager
+	GroupID         int64
+	ConversationRef memory.ConversationRef
+	MemMgr          *memory.Manager
+	JargonMgr       *jargon.Manager
 }
 
 const learningContextKey ctxKey = "learning_context"
@@ -220,7 +223,7 @@ func getRecentMessagesFunc(ctx context.Context, input *GetRecentMessagesInput) (
 		limit = 40
 	}
 
-	messages := tc.MemoryMgr.GetRecentMessages(tc.GroupID, limit, input.Offset)
+	messages := tc.MemoryMgr.GetRecentMessages(tc.ConversationRef, limit, input.Offset)
 	results := make([]map[string]interface{}, 0, len(messages))
 	for _, m := range messages {
 		results = append(results, map[string]interface{}{

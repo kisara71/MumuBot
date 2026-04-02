@@ -55,7 +55,7 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 	}
 
 	// 向量相似度搜索
-	similarMems, err := tc.MemoryMgr.SearchSimilarMemories(ctx, input.Content, tc.GroupID, "", 30, 0.85)
+	similarMems, err := tc.MemoryMgr.SearchSimilarMemoriesByConversation(ctx, input.Content, tc.ConversationRef, "", 30, 0.85)
 	if err == nil && len(similarMems) > 0 {
 		// 调用辅助模型进行合并
 		auxModel, err := llm.NewAuxClient()
@@ -106,10 +106,18 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 	}
 
 	// 如果没有相似记忆或合并失败，直接保存新记忆
+	groupID := tc.GroupID
+	userID := input.RelatedUserID
+	if tc.ConversationRef.IsPrivate() {
+		groupID = 0
+		if userID == 0 {
+			userID = tc.ConversationRef.UserID
+		}
+	}
 	mem := &memory.Memory{
 		Type:       memory.MemoryType(input.Type),
-		GroupID:    tc.GroupID,
-		UserID:     input.RelatedUserID,
+		GroupID:    groupID,
+		UserID:     userID,
 		Content:    input.Content,
 		Importance: input.Importance,
 	}
@@ -167,12 +175,6 @@ func queryMemoryFunc(ctx context.Context, input *QueryMemoryInput) (*QueryMemory
 		return &QueryMemoryOutput{Success: false, Message: "查询内容不能为空"}, nil
 	}
 
-	// 根据开关决定是否限制群 ID
-	groupID := int64(0)
-	if input.Scoped {
-		groupID = tc.GroupID
-	}
-
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 10
@@ -181,7 +183,12 @@ func queryMemoryFunc(ctx context.Context, input *QueryMemoryInput) (*QueryMemory
 		limit = 50
 	}
 
-	memories, err := tc.MemoryMgr.QueryMemory(ctx, input.Query, groupID, memory.MemoryType(input.Type), limit)
+	ref := memory.AllConversationRef()
+	if input.Scoped {
+		ref = tc.ConversationRef
+	}
+
+	memories, err := tc.MemoryMgr.QueryMemoryByConversation(ctx, input.Query, ref, memory.MemoryType(input.Type), limit)
 	if err != nil {
 		return &QueryMemoryOutput{Success: false, Message: err.Error()}, nil
 	}

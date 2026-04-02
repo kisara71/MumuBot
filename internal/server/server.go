@@ -109,7 +109,7 @@ func (s *Server) listMemories(c *gin.Context) {
 	memType := c.DefaultQuery("type", "")
 	page, pageSize := parsePageParams(c)
 
-	memories, total, err := s.memoryMgr.ListMemories(groupID, memType, page, pageSize)
+	memories, total, err := s.memoryMgr.ListMemoriesByConversation(memory.GroupConversationRef(groupID), memType, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -181,7 +181,7 @@ func (s *Server) getMember(c *gin.Context) {
 		return
 	}
 
-	var profile memory.MemberProfile
+	var profile memory.UserProfile
 	query := s.memoryMgr.GetDB().Where("user_id = ?", userID)
 
 	if err := query.First(&profile).Error; err != nil {
@@ -197,7 +197,7 @@ func (s *Server) listMessages(c *gin.Context) {
 	groupID, _ := strconv.ParseInt(c.DefaultQuery("group_id", "0"), 10, 64)
 	page, pageSize := parsePageParams(c)
 
-	messages, total, err := s.memoryMgr.ListMessageLogs(groupID, page, pageSize)
+	messages, total, err := s.memoryMgr.ListMessageLogsByConversation(memory.GroupConversationRef(groupID), page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

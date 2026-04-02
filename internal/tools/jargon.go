@@ -39,7 +39,7 @@ func saveJargonFunc(ctx context.Context, input *SaveJargonInput) (*SaveJargonOut
 	}
 
 	// 先查找是否存在
-	existingJargons, err := lc.MemMgr.SearchJargons(lc.GroupID, input.Content, 1)
+	existingJargons, err := lc.MemMgr.SearchJargonsByConversation(lc.ConversationRef, input.Content, 1)
 	var existing *memory.Jargon
 	if err == nil && len(existingJargons) > 0 {
 		// 精确匹配检查
@@ -67,8 +67,15 @@ func saveJargonFunc(ctx context.Context, input *SaveJargonInput) (*SaveJargonOut
 	}
 
 	// 新建黑话
+	groupID := lc.GroupID
+	userID := int64(0)
+	if lc.ConversationRef.IsPrivate() {
+		groupID = 0
+		userID = lc.ConversationRef.UserID
+	}
 	jargon := &memory.Jargon{
-		GroupID:  lc.GroupID,
+		GroupID:  groupID,
+		UserID:   userID,
 		Content:  input.Content,
 		Meaning:  input.Meaning,
 		Context:  input.Context,
@@ -131,7 +138,7 @@ func searchJargonFunc(ctx context.Context, input *SearchJargonInput) (*SearchJar
 		limit = 10
 	}
 
-	jargons, err := tc.MemoryMgr.SearchJargons(tc.GroupID, input.Keyword, limit)
+	jargons, err := tc.MemoryMgr.SearchJargonsByConversation(tc.ConversationRef, input.Keyword, limit)
 	if err != nil {
 		return &SearchJargonOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -194,7 +201,7 @@ func getUncheckedJargonsFunc(ctx context.Context, input *GetUncheckedJargonsInpu
 		limit = 5
 	}
 
-	jargons, err := lc.MemMgr.GetUncheckedJargons(lc.GroupID, limit)
+	jargons, err := lc.MemMgr.GetUncheckedJargonsByConversation(lc.ConversationRef, limit)
 	if err != nil {
 		return &GetUncheckedJargonsOutput{Success: false, Message: err.Error()}, nil
 	}

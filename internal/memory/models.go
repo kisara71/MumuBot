@@ -1,8 +1,45 @@
 package memory
 
 import (
+	"mumu-bot/internal/onebot"
 	"time"
 )
+
+type ConversationRef struct {
+	Source  onebot.MessageSource `json:"source"`
+	GroupID int64                `json:"group_id,omitempty"`
+	UserID  int64                `json:"user_id,omitempty"`
+}
+
+func AllConversationRef() ConversationRef {
+	return ConversationRef{}
+}
+
+func GroupConversationRef(groupID int64) ConversationRef {
+	return ConversationRef{Source: onebot.MessageSourceGroup, GroupID: groupID}
+}
+
+func PrivateConversationRef(userID int64) ConversationRef {
+	return ConversationRef{Source: onebot.MessageSourcePrivate, UserID: userID}
+}
+
+func (ref ConversationRef) IsGroup() bool {
+	return ref.Source == onebot.MessageSourceGroup && ref.GroupID > 0
+}
+
+func (ref ConversationRef) IsPrivate() bool {
+	return ref.Source == onebot.MessageSourcePrivate && ref.UserID > 0
+}
+
+func (ref ConversationRef) ID() int64 {
+	if ref.IsGroup() {
+		return ref.GroupID
+	}
+	if ref.IsPrivate() {
+		return ref.UserID
+	}
+	return 0
+}
 
 // MemoryType 记忆类型
 type MemoryType string
@@ -14,6 +51,7 @@ const (
 )
 
 // Memory 长期记忆
+// TODO
 type Memory struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -29,8 +67,8 @@ type Memory struct {
 
 func (Memory) TableName() string { return "memories" }
 
-// MemberProfile 成员画像
-type MemberProfile struct {
+// UserProfile 用户画像
+type UserProfile struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -46,7 +84,7 @@ type MemberProfile struct {
 	MsgCount    int       `gorm:"default:0" json:"msg_count"`
 }
 
-func (MemberProfile) TableName() string { return "member_profiles" }
+func (UserProfile) TableName() string { return "member_profiles" }
 
 type StyleIntent string
 
@@ -146,6 +184,7 @@ type Jargon struct {
 	UpdatedAt time.Time `json:"updated_at"`
 
 	GroupID  int64  `gorm:"index" json:"group_id"`
+	UserID   int64  `gorm:"index" json:"user_id"`
 	Content  string `gorm:"type:varchar(100);index" json:"content"`
 	Meaning  string `gorm:"type:text" json:"meaning"`
 	Context  string `gorm:"type:text" json:"context"`
@@ -157,18 +196,17 @@ func (Jargon) TableName() string { return "jargons" }
 
 // MessageLog 消息日志
 type MessageLog struct {
-	ID        uint      `gorm:"primarykey" json:"id"`
-	CreatedAt time.Time `gorm:"index" json:"created_at"`
-
-	MessageID       string `gorm:"type:varchar(100);uniqueIndex" json:"message_id"`
-	GroupID         int64  `gorm:"index" json:"group_id"`
-	UserID          int64  `gorm:"index" json:"user_id"`
-	Nickname        string `gorm:"type:varchar(100)" json:"nickname"`
-	Content         string `gorm:"type:text" json:"content"`
-	OriginalContent string `gorm:"type:text" json:"original_content,omitempty"` // 原始消息内容
-	MsgType         string `gorm:"type:varchar(50)" json:"msg_type"`
-	IsMentioned     bool   `gorm:"default:false" json:"is_mentioned"`
-	Forwards        string `gorm:"type:text" json:"forwards,omitempty"` // 合并转发内容的 JSON
+	ID              uint      `gorm:"primarykey" json:"id"`
+	CreatedAt       time.Time `gorm:"index" json:"created_at"`
+	MessageID       string    `gorm:"type:varchar(100);uniqueIndex" json:"message_id"`
+	GroupID         int64     `gorm:"index" json:"group_id"`
+	UserID          int64     `gorm:"index" json:"user_id"`
+	Nickname        string    `gorm:"type:varchar(100)" json:"nickname"`
+	Content         string    `gorm:"type:text" json:"content"`
+	OriginalContent string    `gorm:"type:text" json:"original_content,omitempty"` // 原始消息内容
+	MessageSource   string    `gorm:"type:varchar(50);index" json:"message_source"`
+	IsMentioned     bool      `gorm:"default:false" json:"is_mentioned"`
+	Forwards        string    `gorm:"type:text" json:"forwards,omitempty"` // 合并转发内容的 JSON
 }
 
 func (MessageLog) TableName() string { return "message_logs" }
