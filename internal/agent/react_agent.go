@@ -1632,9 +1632,6 @@ func (a *Agent) doSpeak(ctx context.Context, ref memory.ConversationRef, content
 		MessageSource:  ref.Source,
 	}
 	a.onMessage(msg)
-	a.buffersMu.Lock()
-	a.buffers[msg.ConversationID].Push(msg)
-	a.buffersMu.Unlock()
 	zap.L().Info("发言成功", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.String("content", content))
 	return msgID, nil
 }
