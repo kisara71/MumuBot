@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"math/rand"
 	"mumu-bot/internal/config"
 	"mumu-bot/internal/conversation"
@@ -724,11 +723,7 @@ func (a *Agent) thinkCycle() {
 			continue
 		}
 
-		if time.Since(lastMsg.Time) > time.Duration(cfg.Agent.ObserveWindow)*time.Second {
-			continue
-		}
-
-		speakProb := utils.ClampFloat64(math.Max(a.getSpeakProbability(ref), 0.65), 0, 1)
+		speakProb := a.getPrivateSpeakProbability(ref)
 		if rand.Float64() > speakProb {
 			continue
 		}
@@ -834,7 +829,53 @@ func (a *Agent) getSpeakProbability(ref memory.ConversationRef) float64 {
 		}
 	}
 
-	// 防话痨限流逻辑
+	return a.applyRateLimitProbability(ref, baseProb)
+}
+
+func (a *Agent) getPrivateSpeakProbability(ref memory.ConversationRef) float64 {
+	// 私聊主动发起比群聊更保守，先按时段给一个基础值，避免深夜打扰。
+	baseProb := 0.28
+	now := time.Now()
+	hour := now.Hour()
+
+	switch {
+	case hour >= 0 && hour < 8:
+		baseProb = 0.03
+	case hour >= 8 && hour < 11:
+		baseProb = 0.18
+	case hour >= 11 && hour < 18:
+		baseProb = 0.24
+	case hour >= 18 && hour < 22:
+		baseProb = 0.32
+	case hour >= 22 && hour < 24:
+		baseProb = 0.10
+	}
+
+	relationFactor := 0.55
+	if profile, err := a.memory.GetMemberProfile(ref.UserID); err == nil && profile != nil {
+		// 关系越近越容易主动找对方；respect 作为负增益，表示更克制、不想打扰。
+		relationFactor = 0.25 +
+			0.45*profile.Intimacy +
+			0.30*profile.Familiarity +
+			0.15*profile.Trust -
+			0.15*profile.Respect
+		relationFactor = utils.ClampFloat64(relationFactor, 0.10, 0.95)
+	}
+
+	moodFactor := 0.75
+	if mood, err := a.memory.GetMoodState(ref.UserID); err == nil && mood != nil {
+		// 当下的社交意愿/好奇心会放大主动概率，烦躁会压低它。
+		moodFactor = 0.45 +
+			0.35*mood.Sociability +
+			0.20*mood.Curiosity -
+			0.30*mood.Irritation
+		moodFactor = utils.ClampFloat64(moodFactor, 0.10, 1.00)
+	}
+
+	return a.applyRateLimitProbability(ref, baseProb*relationFactor*moodFactor)
+}
+
+func (a *Agent) applyRateLimitProbability(ref memory.ConversationRef, baseProb float64) float64 {
 	limitCfg := config.Get().Chat.RateLimit
 	if limitCfg.Enabled && limitCfg.PeriodSec > 0 && limitCfg.MaxMessages > 0 {
 		startTime := time.Now().Add(-time.Duration(limitCfg.PeriodSec) * time.Second)
