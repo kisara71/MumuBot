@@ -49,6 +49,12 @@ type UpdateUserProfileInput struct {
 	CommonWords []string `json:"common_words,omitempty" jsonschema:"description=常用词汇或口头禅（只传入新增的项）"`
 	// IntimacyDelta 亲密度变化值 -0.3 到 0.3
 	IntimacyDelta float64 `json:"intimacy_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=亲密度变化值(-0.3到0.3)，正数表示增加亲密度，负数表示降低亲密度"`
+	// TrustDelta 信任度变化值
+	TrustDelta float64 `json:"trust_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=信任度变化值(-0.3到0.3)"`
+	// FamiliarityDelta 熟悉度变化值
+	FamiliarityDelta float64 `json:"familiarity_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=熟悉度变化值(-0.3到0.3)"`
+	// RespectDelta 认可度变化值
+	RespectDelta float64 `json:"respect_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=认可度变化值(-0.3到0.3)"`
 }
 
 // UpdateMemberProfileOutput 更新成员画像的输出
@@ -105,6 +111,9 @@ func updateMemberProfileFunc(ctx context.Context, input *UpdateUserProfileInput)
 
 	delta := input.IntimacyDelta
 	profile.Intimacy = mutils.ClampFloat64(profile.Intimacy+delta, 0, 1)
+	profile.Trust = mutils.ClampFloat64(profile.Trust+input.TrustDelta, 0, 1)
+	profile.Familiarity = mutils.ClampFloat64(profile.Familiarity+input.FamiliarityDelta, 0, 1)
+	profile.Respect = mutils.ClampFloat64(profile.Respect+input.RespectDelta, 0, 1)
 
 	if err := tc.MemoryMgr.UpdateUserProfile(profile); err != nil {
 		return &UpdateMemberProfileOutput{Success: false, Message: err.Error()}, nil
@@ -140,6 +149,9 @@ type GetUserInfoOutput struct {
 	CommonWords []string `json:"common_words,omitempty"`
 	Activity    float64  `json:"activity,omitempty"` // 活跃度 0-1
 	Intimacy    float64  `json:"intimacy,omitempty"` // 亲密度 0-1
+	Trust       float64  `json:"trust,omitempty"`
+	Familiarity float64  `json:"familiarity,omitempty"`
+	Respect     float64  `json:"respect,omitempty"`
 	MsgCount    int      `json:"msg_count,omitempty"`
 }
 
@@ -182,6 +194,9 @@ func getMemberInfoFunc(ctx context.Context, input *GetUserInfoInput) (*GetUserIn
 		CommonWords: commonWords,
 		Activity:    profile.Activity,
 		Intimacy:    profile.Intimacy,
+		Trust:       profile.Trust,
+		Familiarity: profile.Familiarity,
+		Respect:     profile.Respect,
 		MsgCount:    profile.MsgCount,
 	}, nil
 }

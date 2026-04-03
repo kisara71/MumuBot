@@ -28,12 +28,8 @@ func scopeConversation(ref conversation.Ref, q *gorm.DB, fields ConversationScop
 }
 
 func scopeMessageLogs(ref conversation.Ref, q *gorm.DB) *gorm.DB {
-	switch {
-	case ref.IsGroup():
-		return q.Where("message_source = ? AND group_id = ?", ref.Source, ref.GroupID)
-	case ref.IsPrivate():
-		return q.Where("message_source = ? AND user_id = ?", ref.Source, ref.UserID)
-	default:
-		return q
+	if id := ref.ID(); id != "" {
+		return q.Where("conversation_id = ?", id)
 	}
+	return q
 }

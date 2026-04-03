@@ -76,21 +76,22 @@ func (r *APIResponse) DataList() []interface{} {
 
 // Message 群消息
 type Message struct {
-	MessageID     int64                      `json:"message_id"`
-	GroupID       int64                      `json:"group_id"`
-	UserID        int64                      `json:"user_id"`
-	Nickname      string                     `json:"nickname"`
-	Content       string                     `json:"content"`                 // 纯文本内容
-	IsMentioned   bool                       `json:"is_mentioned"`            // 是否@机器人
-	Time          time.Time                  `json:"time"`                    // 消息时间
-	MessageSource conversation.MessageSource `json:"message_source"`          // 消息类型
-	Images        []ImageInfo                `json:"images,omitempty"`        // 图片列表
-	Videos        []VideoInfo                `json:"videos,omitempty"`        // 视频列表
-	Faces         []FaceInfo                 `json:"faces,omitempty"`         // 表情列表
-	AtList        []int64                    `json:"at_list,omitempty"`       // @的用户列表
-	Reply         *ReplyInfo                 `json:"reply,omitempty"`         // 回复信息
-	Forwards      []ForwardMessage           `json:"forwards,omitempty"`      // 合并转发内容
-	FinalContent  string                     `json:"final_content,omitempty"` // 处理后的最终内容
+	MessageID      int64                      `json:"message_id"`
+	ConversationID string                     `json:"conversation_id,omitempty"`
+	GroupID        int64                      `json:"group_id"`
+	UserID         int64                      `json:"user_id"`
+	Nickname       string                     `json:"nickname"`
+	Content        string                     `json:"content"`                 // 纯文本内容
+	IsMentioned    bool                       `json:"is_mentioned"`            // 是否@机器人
+	Time           time.Time                  `json:"time"`                    // 消息时间
+	MessageSource  conversation.MessageSource `json:"message_source"`          // 消息类型
+	Images         []ImageInfo                `json:"images,omitempty"`        // 图片列表
+	Videos         []VideoInfo                `json:"videos,omitempty"`        // 视频列表
+	Faces          []FaceInfo                 `json:"faces,omitempty"`         // 表情列表
+	AtList         []int64                    `json:"at_list,omitempty"`       // @的用户列表
+	Reply          *ReplyInfo                 `json:"reply,omitempty"`         // 回复信息
+	Forwards       []ForwardMessage           `json:"forwards,omitempty"`      // 合并转发内容
+	FinalContent   string                     `json:"final_content,omitempty"` // 处理后的最终内容
 }
 
 // ImageInfo 图片信息
@@ -431,13 +432,15 @@ func (c *Client) handleRequestEvent(event map[string]interface{}) {
 // parseGroupMessage 解析群消息
 func (c *Client) parseGroupMessage(event map[string]interface{}) *Message {
 	msg := &Message{
-		MessageSource: MessageSourceGroup,
+		MessageSource:  MessageSourceGroup,
+		ConversationID: "",
 	}
 	//	common message
 	c.parseCommonMessage(event, msg)
 	// 群ID
 	if groupID, ok := parseInt64(event["group_id"]); ok {
 		msg.GroupID = groupID
+		msg.ConversationID = conversation.GroupConversationRef(groupID).ID()
 	}
 
 	// 发送者信息
@@ -474,6 +477,7 @@ func (c *Client) parseUserMessage(event map[string]interface{}) *Message {
 	if sender, ok := event["sender"].(map[string]interface{}); ok {
 		if userID, ok := parseInt64(sender["user_id"]); ok {
 			msg.UserID = userID
+			msg.ConversationID = conversation.PrivateConversationRef(userID).ID()
 		}
 		if nickname, ok := sender["nickname"].(string); ok {
 			msg.Nickname = nickname

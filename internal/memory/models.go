@@ -59,6 +59,9 @@ type UserProfile struct {
 	CommonWords string    `gorm:"type:text" json:"common_words"`
 	Activity    float64   `gorm:"default:0.5" json:"activity"`
 	Intimacy    float64   `gorm:"default:0.3" json:"intimacy"`
+	Trust       float64   `gorm:"default:0.4" json:"trust"`
+	Familiarity float64   `gorm:"default:0.2" json:"familiarity"`
+	Respect     float64   `gorm:"default:0.5" json:"respect"`
 	LastSpeak   time.Time `json:"last_speak"`
 	MsgCount    int       `gorm:"default:0" json:"msg_count"`
 }
@@ -178,6 +181,7 @@ type MessageLog struct {
 	ID              uint      `gorm:"primarykey" json:"id"`
 	CreatedAt       time.Time `gorm:"index" json:"created_at"`
 	MessageID       string    `gorm:"type:varchar(100);uniqueIndex" json:"message_id"`
+	ConversationID  string    `gorm:"type:varchar(32);index" json:"conversation_id"`
 	GroupID         int64     `gorm:"index" json:"group_id"`
 	UserID          int64     `gorm:"index" json:"user_id"`
 	Nickname        string    `gorm:"type:varchar(100)" json:"nickname"`
@@ -204,15 +208,18 @@ type Sticker struct {
 
 func (Sticker) TableName() string { return "stickers" }
 
-// MoodState 情绪状态（全局唯一）
+// MoodState 面向某个用户的情绪状态
 type MoodState struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
+	UserID    int64     `gorm:"uniqueIndex" json:"user_id"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	// 情绪三维度
+	// 情绪快变量
 	Valence     float64 `gorm:"default:0.0" json:"valence"`     // [-1.0, 1.0] 心情好坏：负数=心情差，正数=心情好
 	Energy      float64 `gorm:"default:0.5" json:"energy"`      // [0.0, 1.0] 精神/活跃度：低=疲惫，高=活跃
 	Sociability float64 `gorm:"default:0.5" json:"sociability"` // [0.0, 1.0] 社交意愿：低=想安静，高=想聊天
+	Irritation  float64 `gorm:"default:0.0" json:"irritation"`  // [0.0, 1.0] 烦躁度：高=更容易不耐烦
+	Curiosity   float64 `gorm:"default:0.5" json:"curiosity"`   // [0.0, 1.0] 兴趣度：高=更想继续了解/追问
 
 	// 最后变化原因（用于调试）
 	LastReason string `gorm:"type:varchar(200)" json:"last_reason,omitempty"`

@@ -190,7 +190,7 @@ func (c *MilvusClient) Search(ctx context.Context, embedding []float64, refID st
 	// 构建过滤条件
 	var filterParts []string
 	if refID != "" {
-		filterParts = append(filterParts, fmt.Sprintf("conversation_id == %s", refID))
+		filterParts = append(filterParts, fmt.Sprintf("conversation_id == %q", refID))
 	}
 	if memType != "" {
 		filterParts = append(filterParts, fmt.Sprintf("mem_type == \"%s\"", memType))
@@ -267,7 +267,7 @@ func (c *MilvusClient) Delete(ctx context.Context, memoryIDs []uint) error {
 
 // DeleteByGroup 按群删除向量
 func (c *MilvusClient) DeleteByRef(ctx context.Context, refID string) error {
-	filter := fmt.Sprintf("conversation_id == %s", refID)
+	filter := fmt.Sprintf("conversation_id == %q", refID)
 	_, err := c.client.Delete(ctx, milvusclient.NewDeleteOption(c.collectionName).WithExpr(filter))
 	if err != nil {
 		return fmt.Errorf("按群删除向量失败: %w", err)

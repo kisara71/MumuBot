@@ -84,14 +84,10 @@ func messageConversationRef(msg *onebot.Message) memory.ConversationRef {
 	if msg == nil {
 		return memory.AllConversationRef()
 	}
-	switch msg.MessageSource {
-	case conversation.MessageSourceGroup:
-		return memory.GroupConversationRef(msg.GroupID)
-	case conversation.MessageSourcePrivate:
-		return memory.PrivateConversationRef(msg.UserID)
-	default:
-		return memory.AllConversationRef()
+	if ref, ok := conversation.ParseRefID(msg.ConversationID); ok {
+		return ref
 	}
+	return memory.AllConversationRef()
 }
 
 // New 创建 Agent
@@ -371,16 +367,17 @@ func (a *Agent) loadMessages(ref memory.ConversationRef, bufSize int, logs []mem
 			_ = sonic.UnmarshalString(log.Forwards, &forwards)
 		}
 		msg := &onebot.Message{
-			MessageID:     msgID,
-			GroupID:       log.GroupID,
-			UserID:        log.UserID,
-			Nickname:      log.Nickname,
-			Content:       log.OriginalContent,
-			FinalContent:  log.Content,
-			IsMentioned:   log.IsMentioned,
-			Time:          log.CreatedAt,
-			MessageSource: onebot.MessageSource(log.MessageSource),
-			Forwards:      forwards,
+			MessageID:      msgID,
+			ConversationID: ref.ID(),
+			GroupID:        log.GroupID,
+			UserID:         log.UserID,
+			Nickname:       log.Nickname,
+			Content:        log.OriginalContent,
+			FinalContent:   log.Content,
+			IsMentioned:    log.IsMentioned,
+			Time:           log.CreatedAt,
+			MessageSource:  onebot.MessageSource(log.MessageSource),
+			Forwards:       forwards,
 		}
 		buf.Push(msg)
 	}
@@ -451,6 +448,7 @@ func (a *Agent) onMessage(msg *onebot.Message) {
 	a.addBuffer(msg)
 	_ = a.memory.AddMessage(memory.MessageLog{
 		MessageID:       fmt.Sprintf("%d", msg.MessageID),
+		ConversationID:  messageConversationRef(msg).ID(),
 		GroupID:         msg.GroupID,
 		UserID:          msg.UserID,
 		Nickname:        msg.Nickname,
@@ -564,16 +562,33 @@ func (a *Agent) parseMessageContent(msg *onebot.Message) string {
 		}
 	}
 
-	var qid string
-	if msg.UserID == config.Get().Persona.QQ {
-		qid = "你"
-	} else {
-		qid = fmt.Sprintf("%d", msg.UserID)
-	}
+	speaker := a.formatMessageSpeaker(msg)
 
 	// 构建完整消息行
-	return fmt.Sprintf("[%s] #%d %s(%s):%s %s\n",
-		msg.Time.Format("15:04:05"), msg.MessageID, msg.Nickname, qid, replyInfo, content)
+	return fmt.Sprintf("[%s] #%d %s:%s %s\n",
+		msg.Time.Format("15:04:05"), msg.MessageID, speaker, replyInfo, content)
+}
+
+func (a *Agent) formatMessageSpeaker(msg *onebot.Message) string {
+	if msg == nil {
+		return "未知"
+	}
+
+	if msg.UserID == a.bot.GetSelfID() {
+		if name := strings.TrimSpace(a.persona.GetName()); name != "" {
+			return fmt.Sprintf("你(%s)", name)
+		}
+		return "你"
+	}
+
+	name := strings.TrimSpace(msg.Nickname)
+	if name == "" {
+		name = "未知用户"
+	}
+	if msg.MessageSource == onebot.MessageSourcePrivate {
+		return fmt.Sprintf("对方(%s,%d)", name, msg.UserID)
+	}
+	return fmt.Sprintf("%s(%d)", name, msg.UserID)
 }
 
 func (a *Agent) addBuffer(msg *onebot.Message) {
@@ -630,7 +645,12 @@ func (a *Agent) updateMember(msg *onebot.Message) {
 
 func (a *Agent) thinkLoop() {
 	defer a.wg.Done()
-	ticker := time.NewTicker(time.Duration(config.Get().Agent.ThinkInterval) * time.Second)
+	interval := time.Duration(config.Get().Agent.ThinkInterval) * time.Second
+	zap.L().Info("思考循环已启动",
+		zap.Duration("interval", interval),
+		zap.Int("groups", len(config.Get().Groups)),
+		zap.Int("users", len(config.Get().Users)))
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -909,12 +929,16 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 		promptCtx.RelatedMemories, promptCtx.CrossGroupExperiences = a.buildMemoryContext(ctx, ref)
 	}
 
-	// 获取当前情绪状态
-	if mood, err := a.memory.GetMoodState(); err == nil {
-		promptCtx.MoodState = &persona.MoodInfo{
-			Valence:     mood.Valence,
-			Energy:      mood.Energy,
-			Sociability: mood.Sociability,
+	// 获取当前目标用户的情绪状态
+	if targetUserID := a.resolveMoodTargetUserID(ref); targetUserID > 0 {
+		if mood, err := a.memory.GetMoodState(targetUserID); err == nil {
+			promptCtx.MoodState = &persona.MoodInfo{
+				Valence:     mood.Valence,
+				Energy:      mood.Energy,
+				Sociability: mood.Sociability,
+				Irritation:  mood.Irritation,
+				Curiosity:   mood.Curiosity,
+			}
 		}
 	}
 
@@ -936,7 +960,7 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 	}
 
 	// 构建消息
-	systemPrompt := a.persona.GetSystemPrompt()
+	systemPrompt := a.persona.GetSystemPrompt(ref)
 
 	// 添加专属额外提示词
 	extraPrompt := ""
@@ -1057,6 +1081,9 @@ func (a *Agent) buildPrivatePeerContext(ref memory.ConversationRef) string {
 	details := []string{
 		fmt.Sprintf("- 对方: %s", displayName),
 		fmt.Sprintf("- 亲密度: %.2f", profile.Intimacy),
+		fmt.Sprintf("- 信任度: %.2f", profile.Trust),
+		fmt.Sprintf("- 熟悉度: %.2f", profile.Familiarity),
+		fmt.Sprintf("- 认可度: %.2f", profile.Respect),
 		fmt.Sprintf("- 活跃度: %.2f", profile.Activity),
 		"- 当前场景: 这是你和对方的一对一私聊",
 	}
@@ -1075,6 +1102,21 @@ func (a *Agent) buildPrivatePeerContext(ref memory.ConversationRef) string {
 	}
 
 	return strings.Join(details, "\n")
+}
+
+func (a *Agent) resolveMoodTargetUserID(ref memory.ConversationRef) int64 {
+	if ref.IsPrivate() {
+		return ref.UserID
+	}
+
+	msgs := a.getBuffer(ref)
+	selfID := a.bot.GetSelfID()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].UserID != 0 && msgs[i].UserID != selfID {
+			return msgs[i].UserID
+		}
+	}
+	return 0
 }
 
 func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationRef) ([]memory.Memory, []memory.Memory) {
@@ -1367,6 +1409,9 @@ func (a *Agent) buildRecentPeopleContext(ref memory.ConversationRef) string {
 
 		details := []string{
 			fmt.Sprintf("亲密度 %.2f", profile.Intimacy),
+			fmt.Sprintf("信任度 %.2f", profile.Trust),
+			fmt.Sprintf("熟悉度 %.2f", profile.Familiarity),
+			fmt.Sprintf("认可度 %.2f", profile.Respect),
 			fmt.Sprintf("活跃度 %.2f", profile.Activity),
 		}
 		if profile.SpeakStyle != "" {
@@ -1434,13 +1479,15 @@ func (a *Agent) doSpeak(ctx context.Context, ref memory.ConversationRef, content
 	}
 
 	msg := &onebot.Message{
-		MessageID:     msgID,
-		GroupID:       ref.GroupID,
-		UserID:        a.bot.GetSelfID(),
-		Nickname:      a.persona.GetName(),
-		Content:       content,
-		Time:          time.Now(),
-		MessageSource: ref.Source,
+		MessageID:      msgID,
+		ConversationID: ref.ID(),
+		GroupID:        ref.GroupID,
+		UserID:         a.bot.GetSelfID(),
+		Nickname:       a.persona.GetName(),
+		Content:        content,
+		FinalContent:   content,
+		Time:           time.Now(),
+		MessageSource:  ref.Source,
 	}
 	a.onMessage(msg)
 	zap.L().Info("发言成功", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.String("content", content))
@@ -1474,13 +1521,15 @@ func (a *Agent) doSendSticker(ctx context.Context, ref memory.ConversationRef, f
 	}
 
 	msg := &onebot.Message{
-		MessageID:     msgID,
-		GroupID:       ref.GroupID,
-		UserID:        a.bot.GetSelfID(),
-		Nickname:      a.persona.GetName(),
-		Content:       "",
-		Time:          time.Now(),
-		MessageSource: ref.Source,
+		MessageID:      msgID,
+		ConversationID: ref.ID(),
+		GroupID:        ref.GroupID,
+		UserID:         a.bot.GetSelfID(),
+		Nickname:       a.persona.GetName(),
+		Content:        "",
+		FinalContent:   content,
+		Time:           time.Now(),
+		MessageSource:  ref.Source,
 		Images: []onebot.ImageInfo{
 			{Summary: content, SubType: 1},
 		},

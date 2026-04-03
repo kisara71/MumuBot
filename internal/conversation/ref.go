@@ -45,3 +45,17 @@ func (ref Ref) ID() string {
 	}
 	return ""
 }
+
+func ParseRefID(id string) (Ref, bool) {
+	var groupID int64
+	if _, err := fmt.Sscanf(id, "group_%d", &groupID); err == nil && groupID > 0 {
+		return GroupConversationRef(groupID), true
+	}
+
+	var userID int64
+	if _, err := fmt.Sscanf(id, "private_%d", &userID); err == nil && userID > 0 {
+		return PrivateConversationRef(userID), true
+	}
+
+	return Ref{}, false
+}

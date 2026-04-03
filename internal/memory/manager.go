@@ -368,28 +368,22 @@ func (m *Manager) cleanupMessageLogs(keepLatest int) {
 	}
 
 	type logScope struct {
-		MessageSource string
-		GroupID       int64
-		UserID        int64
+		ConversationID string
 	}
 
 	var scopes []logScope
 	if err := m.db.Model(&MessageLog{}).
-		Select("message_source, group_id, user_id").
-		Group("message_source, group_id, user_id").
+		Where("conversation_id <> ''").
+		Select("conversation_id").
+		Group("conversation_id").
 		Scan(&scopes).Error; err != nil {
 		zap.L().Warn("清理消息日志失败：获取会话列表失败", zap.Error(err))
 		return
 	}
 
 	for _, scope := range scopes {
-		ref := AllConversationRef()
-		switch conversation.MessageSource(scope.MessageSource) {
-		case conversation.MessageSourceGroup:
-			ref = GroupConversationRef(scope.GroupID)
-		case conversation.MessageSourcePrivate:
-			ref = PrivateConversationRef(scope.UserID)
-		default:
+		ref, ok := conversation.ParseRefID(scope.ConversationID)
+		if !ok {
 			continue
 		}
 
@@ -879,11 +873,14 @@ func (m *Manager) GetOrCreateMemberProfile(userID int64, nickname string) (*User
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		profile = UserProfile{
-			UserID:    userID,
-			Nickname:  nickname,
-			Activity:  0.5, // 初始活跃度
-			Intimacy:  0.3, // 初始亲密度
-			LastSpeak: time.Now(),
+			UserID:      userID,
+			Nickname:    nickname,
+			Activity:    0.5, // 初始活跃度
+			Intimacy:    0.3, // 初始亲密度
+			Trust:       0.4,
+			Familiarity: 0.2,
+			Respect:     0.5,
+			LastSpeak:   time.Now(),
 		}
 		if err := m.db.Create(&profile).Error; err != nil {
 			return nil, err
@@ -1089,16 +1086,21 @@ func (m *Manager) startMoodDecay() {
 	zap.L().Info("情绪衰减任务已启动")
 }
 
-// GetMoodState 获取当前情绪状态
-func (m *Manager) GetMoodState() (*MoodState, error) {
+// GetMoodState 获取某个用户的情绪状态
+func (m *Manager) GetMoodState(userID int64) (*MoodState, error) {
+	if userID == 0 {
+		return nil, fmt.Errorf("userID 不能为空")
+	}
 	var mood MoodState
-	err := m.db.First(&mood).Error
+	err := m.db.Where("user_id = ?", userID).First(&mood).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// 不存在则创建默认情绪
 		mood = MoodState{
+			UserID:      userID,
 			Valence:     0.0,
 			Energy:      0.5,
 			Sociability: 0.5,
+			Irritation:  0.0,
+			Curiosity:   0.5,
 		}
 		if err := m.db.Create(&mood).Error; err != nil {
 			return nil, err
@@ -1111,17 +1113,18 @@ func (m *Manager) GetMoodState() (*MoodState, error) {
 	return &mood, nil
 }
 
-// UpdateMoodState 更新情绪状态（增量更新）
-func (m *Manager) UpdateMoodState(valenceDelta, energyDelta, sociabilityDelta float64, reason string) (*MoodState, error) {
-	mood, err := m.GetMoodState()
+// UpdateMoodState 更新某个用户的情绪状态（增量更新）
+func (m *Manager) UpdateMoodState(userID int64, valenceDelta, energyDelta, sociabilityDelta, irritationDelta, curiosityDelta float64, reason string) (*MoodState, error) {
+	mood, err := m.GetMoodState(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 应用增量
 	mood.Valence = utils.ClampFloat64(mood.Valence+valenceDelta, -1.0, 1.0)
 	mood.Energy = utils.ClampFloat64(mood.Energy+energyDelta, 0.0, 1.0)
 	mood.Sociability = utils.ClampFloat64(mood.Sociability+sociabilityDelta, 0.0, 1.0)
+	mood.Irritation = utils.ClampFloat64(mood.Irritation+irritationDelta, 0.0, 1.0)
+	mood.Curiosity = utils.ClampFloat64(mood.Curiosity+curiosityDelta, 0.0, 1.0)
 	mood.LastReason = reason
 
 	if err := m.db.Save(mood).Error; err != nil {
@@ -1132,20 +1135,21 @@ func (m *Manager) UpdateMoodState(valenceDelta, energyDelta, sociabilityDelta fl
 
 // ApplyMoodDecay 应用情绪自然衰减
 func (m *Manager) ApplyMoodDecay() error {
-	mood, err := m.GetMoodState()
-	if err != nil {
+	var moods []MoodState
+	if err := m.db.Find(&moods).Error; err != nil {
 		return err
 	}
-
-	// 衰减公式：
-	// valence *= 0.95 (向0衰减)
-	// energy += (0.5 - energy) * 0.05 (向0.5衰减)
-	// sociability += (0.5 - sociability) * 0.05 (向0.5衰减)
-	mood.Valence *= 0.95
-	mood.Energy += (0.5 - mood.Energy) * 0.05
-	mood.Sociability += (0.5 - mood.Sociability) * 0.05
-
-	return m.db.Save(mood).Error
+	for i := range moods {
+		moods[i].Valence *= 0.95
+		moods[i].Energy += (0.5 - moods[i].Energy) * 0.05
+		moods[i].Sociability += (0.5 - moods[i].Sociability) * 0.05
+		moods[i].Irritation += (0.0 - moods[i].Irritation) * 0.08
+		moods[i].Curiosity += (0.5 - moods[i].Curiosity) * 0.05
+		if err := m.db.Save(&moods[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ==================== 学习状态管理 ====================
