@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"mumu-bot/internal/config"
 	"mumu-bot/internal/conversation"
@@ -17,6 +18,7 @@ import (
 	"mumu-bot/internal/tools"
 	"mumu-bot/internal/utils"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -615,14 +617,14 @@ func (a *Agent) updateMember(msg *onebot.Message) {
 	}
 	p, err := a.memory.GetOrCreateMemberProfile(msg.UserID, msg.Nickname)
 	if err != nil {
-		zap.L().Error("获取成员画像失败", zap.Error(err))
+		zap.L().Error("获取用户画像失败", zap.Error(err))
 		return
 	}
 	p.MsgCount++
 	p.LastSpeak = msg.Time
 	p.Nickname = msg.Nickname
-	if err := a.memory.UpdateMemberProfile(p); err != nil {
-		zap.L().Error("更新成员画像失败", zap.Error(err))
+	if err := a.memory.UpdateUserProfile(p); err != nil {
+		zap.L().Error("更新用户画像失败", zap.Error(err))
 	}
 }
 
@@ -677,6 +679,36 @@ func (a *Agent) thinkCycle() {
 		}
 		// 获取当前的发言概率（考虑时段规则）
 		speakProb := a.getSpeakProbability(ref)
+		if rand.Float64() > speakProb {
+			continue
+		}
+		a.scheduleThink(ref, false, true)
+	}
+
+	for _, uc := range cfg.Users {
+		if !uc.Enabled {
+			continue
+		}
+		ref := memory.PrivateConversationRef(uc.UserID)
+		msgs := a.getBuffer(ref)
+		if len(msgs) == 0 {
+			continue
+		}
+
+		lastMsg := msgs[len(msgs)-1]
+
+		a.processingMu.RLock()
+		lastTime := a.lastProcessedTime[ref.ID()]
+		a.processingMu.RUnlock()
+		if !lastTime.IsZero() && lastMsg.Time.Before(lastTime) {
+			continue
+		}
+
+		if time.Since(lastMsg.Time) > time.Duration(cfg.Agent.ObserveWindow)*time.Second {
+			continue
+		}
+
+		speakProb := utils.ClampFloat64(math.Max(a.getSpeakProbability(ref), 0.65), 0, 1)
 		if rand.Float64() > speakProb {
 			continue
 		}
@@ -870,10 +902,8 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 
 	// 构建动态 prompt 上下文
 	promptCtx := &persona.PromptContext{
-		GroupID: ref.GroupID,
+		Ref: ref,
 	}
-	promptCtx.GroupInfo = a.buildGroupContext(ref)
-
 	// 主动记忆检索
 	if config.Get().Agent.EnableActiveRetrieval {
 		promptCtx.RelatedMemories, promptCtx.CrossGroupExperiences = a.buildMemoryContext(ctx, ref)
@@ -892,10 +922,18 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 	if a.jargonMgr != nil {
 		promptCtx.JargonMatches = a.jargonMgr.Match(chatContext)
 	}
-	promptCtx.StyleHints = a.buildStyleHintContext(ctx, ref)
+	if ref.IsGroup() {
+		promptCtx.GroupInfo = a.buildGroupContext(ref)
+		promptCtx.StyleHints = a.buildStyleHintContext(ctx, ref)
+	} else if ref.IsPrivate() {
+		promptCtx.PeerInfo = a.buildPrivatePeerContext(ref)
+	}
 
 	// 获取最近在场的人
-	recentPeople := a.buildRecentPeopleContext(ref)
+	recentPeople := ""
+	if ref.IsGroup() {
+		recentPeople = a.buildRecentPeopleContext(ref)
+	}
 
 	// 构建消息
 	systemPrompt := a.persona.GetSystemPrompt()
@@ -986,6 +1024,59 @@ func (a *Agent) buildGroupContext(ref memory.ConversationRef) string {
 	return strings.Join(parts, "\n")
 }
 
+func (a *Agent) buildPrivatePeerContext(ref memory.ConversationRef) string {
+	if !ref.IsPrivate() {
+		return ""
+	}
+
+	msgs := a.getBuffer(ref)
+	nickname := ""
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].UserID == ref.UserID && msgs[i].Nickname != "" {
+			nickname = msgs[i].Nickname
+			break
+		}
+	}
+
+	profile, err := a.memory.GetMemberProfile(ref.UserID)
+	if err != nil {
+		if nickname == "" {
+			nickname = fmt.Sprintf("%d", ref.UserID)
+		}
+		return fmt.Sprintf("- 对方: %s\n- 当前场景: 这是你和对方的一对一私聊", nickname)
+	}
+
+	displayName := profile.Nickname
+	if displayName == "" {
+		displayName = nickname
+	}
+	if displayName == "" {
+		displayName = fmt.Sprintf("%d", ref.UserID)
+	}
+
+	details := []string{
+		fmt.Sprintf("- 对方: %s", displayName),
+		fmt.Sprintf("- 亲密度: %.2f", profile.Intimacy),
+		fmt.Sprintf("- 活跃度: %.2f", profile.Activity),
+		"- 当前场景: 这是你和对方的一对一私聊",
+	}
+	if profile.SpeakStyle != "" {
+		details = append(details, "- 说话风格: "+profile.SpeakStyle)
+	}
+	interests := strings.TrimSpace(profile.Interests)
+	if interests != "" {
+		var items []string
+		if err := sonic.UnmarshalString(interests, &items); err == nil && len(items) > 0 {
+			interests = strings.Join(items, "、")
+		}
+	}
+	if interests != "" {
+		details = append(details, "- 兴趣: "+interests)
+	}
+
+	return strings.Join(details, "\n")
+}
+
 func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationRef) ([]memory.Memory, []memory.Memory) {
 	msgs := a.getBuffer(ref)
 	if len(msgs) == 0 {
@@ -1046,6 +1137,7 @@ func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationR
 }
 
 func collectTextContext(msgs []*onebot.Message) string {
+	msgs = sortedMessages(msgs)
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -1060,6 +1152,27 @@ func collectTextContext(msgs []*onebot.Message) string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+func sortedMessages(msgs []*onebot.Message) []*onebot.Message {
+	if len(msgs) <= 1 {
+		return msgs
+	}
+
+	cloned := append([]*onebot.Message(nil), msgs...)
+	sort.SliceStable(cloned, func(i, j int) bool {
+		if cloned[i] == nil || cloned[j] == nil {
+			return i < j
+		}
+		if cloned[i].MessageID > 0 && cloned[j].MessageID > 0 && cloned[i].MessageID != cloned[j].MessageID {
+			return cloned[i].MessageID < cloned[j].MessageID
+		}
+		if !cloned[i].Time.Equal(cloned[j].Time) {
+			return cloned[i].Time.Before(cloned[j].Time)
+		}
+		return i < j
+	})
+	return cloned
 }
 
 func (a *Agent) buildStyleHintContext(ctx context.Context, ref memory.ConversationRef) []string {
@@ -1182,7 +1295,7 @@ func formatStyleHint(card memory.StyleCard) string {
 
 // buildChatContext 构建聊天上下文
 func (a *Agent) buildChatContext(ref memory.ConversationRef, lastProcessedTime time.Time) string {
-	msgs := a.getBuffer(ref)
+	msgs := sortedMessages(a.getBuffer(ref))
 	if len(msgs) == 0 {
 		return ""
 	}

@@ -99,7 +99,7 @@ func saveJargonFunc(ctx context.Context, input *SaveJargonInput) (*SaveJargonOut
 func NewSaveJargonTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"saveJargon",
-		`保存群里的黑话、术语或梗。可重复保存，会覆盖已有的记录。`,
+		`保存黑话、术语或梗。可重复保存，会覆盖已有的记录。`,
 		saveJargonFunc,
 	)
 }
@@ -166,7 +166,7 @@ func searchJargonFunc(ctx context.Context, input *SearchJargonInput) (*SearchJar
 func NewSearchJargonTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"searchJargon",
-		`搜索已保存的黑话、术语或梗（优先搜索来源于本群的）。`,
+		`搜索已保存的黑话、术语或梗（优先搜索来源于本群/本私聊对象的）。`,
 		searchJargonFunc,
 	)
 }

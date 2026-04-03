@@ -214,7 +214,7 @@ func (m *Manager) SearchSimilarMemoriesByConversation(ctx context.Context, text 
 		return nil, err
 	}
 
-	results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), string(memType), limit, threshold)
+	results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), normalizeMemoryTypeFilter(memType), limit, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +286,7 @@ func (m *Manager) QueryMemoryByConversation(ctx context.Context, query string, r
 	// 尝试 Milvus 向量搜索
 	if m.milvus != nil && m.embedding != nil {
 		if emb, err := m.embedding.Embed(ctx, query); err == nil {
-			if results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), string(memType), limit, 0.7); err == nil && len(results) > 0 {
+			if results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), normalizeMemoryTypeFilter(memType), limit, 0.7); err == nil && len(results) > 0 {
 				return results, nil
 			}
 		}
@@ -455,6 +455,10 @@ func (m *Manager) milvusVectorSearch(ctx context.Context, queryEmb []float64, re
 	}
 
 	return sortedMemories, nil
+}
+
+func normalizeMemoryTypeFilter(memType MemoryType) string {
+	return strings.TrimSpace(string(memType))
 }
 
 // ==================== 风格卡片 ====================
@@ -889,8 +893,8 @@ func (m *Manager) GetOrCreateMemberProfile(userID int64, nickname string) (*User
 	return &profile, err
 }
 
-// UpdateMemberProfile 更新成员画像
-func (m *Manager) UpdateMemberProfile(profile *UserProfile) error {
+// UpdateUserProfile 更新用户画像
+func (m *Manager) UpdateUserProfile(profile *UserProfile) error {
 	// 计算活跃度：基于最近发言时间和消息数量
 	// 活跃度衰减：每天降低0.1，最低0.1
 	daysSinceLastSpeak := time.Since(profile.LastSpeak).Hours() / 24

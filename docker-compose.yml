@@ -1,36 +1,4 @@
 services:
-  mumu-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: mumu-bot
-    depends_on:
-      mysql:
-        condition: service_healthy
-      etcd:
-        condition: service_started
-      minio:
-        condition: service_started
-      milvus:
-        condition: service_started
-    environment:
-      TZ: Asia/Shanghai
-      MUMU_LLM_API_KEY: ${MUMU_LLM_API_KEY:-}
-      MUMU_AUX_LLM_API_KEY: ${MUMU_AUX_LLM_API_KEY:-}
-      MUMU_EMBEDDING_API_KEY: ${MUMU_EMBEDDING_API_KEY:-}
-      MUMU_VISION_API_KEY: ${MUMU_VISION_API_KEY:-}
-      MUMU_MYSQL_PASSWORD: ${MUMU_MYSQL_PASSWORD:-mumu_local_pwd}
-      MUMU_ONEBOT_TOKEN: ${MUMU_ONEBOT_TOKEN:-}
-    ports:
-      - "${MUMU_HTTP_PORT:-8080}:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ./config/config.docker.yaml:/app/config/config.yaml:ro
-      - ./config/mcp.example.json:/app/config/mcp.json:ro
-      - ./data/stickers:/app/stickers
-    restart: unless-stopped
-
   mysql:
     image: mysql:8.4
     container_name: mumu-mysql

@@ -94,13 +94,13 @@ vision_llm:
 
 memory:
   mysql:
-    host: "mysql"
+    host: "127.0.0.1"
     port: 3306
     user: "root"
     password: ""
     db_name: "mumu_bot"
   milvus:
-    address: "milvus:19530"
+    address: "127.0.0.1:19530"
     db_name: "default"
     collection_name: "mumu_memories"
     vector_dim: 1024

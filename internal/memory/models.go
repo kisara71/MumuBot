@@ -24,8 +24,9 @@ type MemoryType string
 
 const (
 	MemoryTypeGroupFact      MemoryType = "group_fact"      // 群长期事实（群规、群风格、重要事件等）
+	MemoryTypeUserFact       MemoryType = "user_fact"       // 某个用户的稳定事实，尤其适合私聊沉淀
 	MemoryTypeSelfExperience MemoryType = "self_experience" // 自身经历（参与的事、被提及、感受等）
-	MemoryTypeConversation   MemoryType = "conversation"    // 对话记忆（重要的对话内容、群友说的事）
+	MemoryTypeConversation   MemoryType = "conversation"    // 对话中的重要信息或阶段性上下文
 )
 
 // Memory 长期记忆
