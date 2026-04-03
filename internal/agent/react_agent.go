@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"mumu-bot/internal/config"
 	"mumu-bot/internal/conversation"
@@ -76,6 +77,7 @@ type Agent struct {
 type pendingThink struct {
 	timer      *time.Timer
 	isMention  bool
+	fromLoop   bool
 	generation uint64
 }
 
@@ -738,6 +740,7 @@ func (a *Agent) scheduleThink(ref memory.ConversationRef, isMention bool, fromLo
 	defer a.pendingMu.Unlock()
 	if pending, ok := a.pendingThinks[ref.ID()]; ok {
 		pending.isMention = pending.isMention || isMention
+		pending.fromLoop = pending.fromLoop || fromLoop
 		pending.generation++
 		gen := pending.generation
 		pending.timer = time.AfterFunc(debounce, func() {
@@ -752,6 +755,7 @@ func (a *Agent) scheduleThink(ref memory.ConversationRef, isMention bool, fromLo
 
 	pending := &pendingThink{
 		isMention:  isMention,
+		fromLoop:   fromLoop,
 		generation: 1,
 	}
 	gen := pending.generation
@@ -770,10 +774,11 @@ func (a *Agent) flushPendingThink(ref memory.ConversationRef, generation uint64)
 	}
 
 	isMention := pending.isMention
+	fromLoop := pending.fromLoop
 	delete(a.pendingThinks, ref.ID())
 	a.pendingMu.Unlock()
 
-	a.concurrencyMgr.Submit(ref, isMention)
+	a.concurrencyMgr.Submit(ref, isMention, fromLoop)
 }
 
 func (a *Agent) clearPendingThinks() {
@@ -829,7 +834,7 @@ func (a *Agent) getSpeakProbability(ref memory.ConversationRef) float64 {
 		}
 	}
 
-	return a.applyRateLimitProbability(ref, baseProb)
+	return a.applyGroupRateLimitProbability(ref, baseProb)
 }
 
 func (a *Agent) getPrivateSpeakProbability(ref memory.ConversationRef) float64 {
@@ -872,10 +877,10 @@ func (a *Agent) getPrivateSpeakProbability(ref memory.ConversationRef) float64 {
 		moodFactor = utils.ClampFloat64(moodFactor, 0.10, 1.00)
 	}
 
-	return a.applyRateLimitProbability(ref, baseProb*relationFactor*moodFactor)
+	return a.applyPrivateRateLimitProbability(ref, baseProb*relationFactor*moodFactor)
 }
 
-func (a *Agent) applyRateLimitProbability(ref memory.ConversationRef, baseProb float64) float64 {
+func (a *Agent) applyGroupRateLimitProbability(ref memory.ConversationRef, baseProb float64) float64 {
 	limitCfg := config.Get().Chat.RateLimit
 	if limitCfg.Enabled && limitCfg.PeriodSec > 0 && limitCfg.MaxMessages > 0 {
 		startTime := time.Now().Add(-time.Duration(limitCfg.PeriodSec) * time.Second)
@@ -897,8 +902,8 @@ func (a *Agent) applyRateLimitProbability(ref memory.ConversationRef, baseProb f
 			oldProb := baseProb
 			baseProb *= decay
 
-			// 最小保底检查
-			minProb := utils.ClampFloat64(limitCfg.MinProb, 0, 1)
+			// 保底概率不能把本来更低的基础概率反向抬高。
+			minProb := utils.ClampFloat64(math.Min(limitCfg.MinProb, oldProb), 0, 1)
 			baseProb = utils.ClampFloat64(baseProb, minProb, 1)
 
 			// 仅在触发衰减时打印日志
@@ -917,8 +922,41 @@ func (a *Agent) applyRateLimitProbability(ref memory.ConversationRef, baseProb f
 	return baseProb
 }
 
+func (a *Agent) applyPrivateRateLimitProbability(ref memory.ConversationRef, baseProb float64) float64 {
+	// 私聊单独限流：只看当前用户会话，且比群聊宽松，避免正常往返被过早压住。
+	startTime := time.Now().Add(-20 * time.Minute)
+	count, err := a.memory.GetMessageCountByTime(ref, a.bot.GetSelfID(), startTime)
+	if err != nil {
+		return utils.ClampFloat64(baseProb, 0, 1)
+	}
+
+	oldProb := baseProb
+	switch {
+	case count >= 16:
+		baseProb *= 0.10
+	case count >= 12:
+		baseProb *= 0.30
+	case count >= 9:
+		baseProb *= 0.55
+	case count >= 6:
+		baseProb *= 0.80
+	default:
+		return utils.ClampFloat64(baseProb, 0, 1)
+	}
+
+	// 私聊仍保留很低的兜底概率，避免彻底锁死某个会话。
+	baseProb = utils.ClampFloat64(baseProb, math.Min(0.02, oldProb), 1)
+	zap.L().Debug("触发私聊限流",
+		zap.String("source", string(ref.Source)),
+		zap.String("id", ref.ID()),
+		zap.Int64("recent_msgs", count),
+		zap.Float64("original_prob", oldProb),
+		zap.Float64("new_prob", baseProb))
+	return baseProb
+}
+
 // think 提交思考任务
-func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
+func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool) {
 	if err := a.ctx.Err(); err != nil {
 		return
 	}
@@ -964,6 +1002,9 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 	// 构建动态 prompt 上下文
 	promptCtx := &persona.PromptContext{
 		Ref: ref,
+	}
+	if fromLoop {
+		promptCtx.LoopInfo = a.buildLoopContext(ref)
 	}
 	// 主动记忆检索
 	if config.Get().Agent.EnableActiveRetrieval {
@@ -1056,6 +1097,55 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool) {
 	if config.Get().Debug.ShowThinking && result != nil && result.Content != "" {
 		zap.L().Debug("Agent 输出", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.String("content", result.Content))
 	}
+}
+
+func (a *Agent) buildLoopContext(ref memory.ConversationRef) string {
+	msgs := a.getBuffer(ref)
+	if len(msgs) == 0 {
+		return ""
+	}
+
+	now := time.Now()
+	lastOther := time.Time{}
+	lastSelf := time.Time{}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if lastSelf.IsZero() && msg.UserID == a.bot.GetSelfID() {
+			lastSelf = msg.Time
+		}
+		if lastOther.IsZero() && msg.UserID != a.bot.GetSelfID() {
+			lastOther = msg.Time
+		}
+		if !lastSelf.IsZero() && !lastOther.IsZero() {
+			break
+		}
+	}
+
+	lines := []string{
+		"- 这是一次定时主动思考，不是对方刚发来新消息",
+	}
+	if !lastOther.IsZero() {
+		lines = append(lines, fmt.Sprintf("- 距离对方上次发言：%s", humanizeElapsed(now.Sub(lastOther))))
+	}
+	if !lastSelf.IsZero() {
+		lines = append(lines, fmt.Sprintf("- 距离你上次发言：%s", humanizeElapsed(now.Sub(lastSelf))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func humanizeElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return "不到1分钟"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d分钟", int(d/time.Minute))
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	if m == 0 {
+		return fmt.Sprintf("%d小时", h)
+	}
+	return fmt.Sprintf("%d小时%d分钟", h, m)
 }
 
 func (a *Agent) buildGroupContext(ref memory.ConversationRef) string {

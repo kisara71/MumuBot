@@ -27,6 +27,7 @@ type PromptContext struct {
 	JargonMatches         map[string]string // 匹配到的黑话/梗
 	GroupInfo             string
 	PeerInfo              string
+	LoopInfo              string
 	RelatedMemories       []memory.Memory // 当前群相关记忆
 	CrossGroupExperiences []memory.Memory // 跨群自我经历
 	StyleHints            []string
@@ -159,6 +160,10 @@ func (p *Persona) getPrivateThinkPrompt(ctx *PromptContext, chatContext string, 
 		b.WriteString(fmt.Sprintf("\n补充说明：\n%s\n", privateExtra))
 	}
 
+	if ctx != nil && ctx.LoopInfo != "" {
+		b.WriteString(fmt.Sprintf("\n主动触发信息：\n%s\n", ctx.LoopInfo))
+	}
+
 	b.WriteString(fmt.Sprintf("\n对话：\n以“你(...)”开头的是你自己说的话，以“对方(...)”开头的是对方说的话；带“(OLD)”的是旧消息，仅供参考。\n%s\n", chatContext))
 
 	b.WriteString(`
@@ -171,8 +176,8 @@ func (p *Persona) getPrivateThinkPrompt(ctx *PromptContext, chatContext string, 
 
 	b.WriteString(`
 行动：
-- 私聊里可以更直接、更连续地接话。
-- 有明确回应就直接行动；没必要继续就调用 stayQuiet。
+- 私聊里可以更直接、更连续地接话，也可以主动换话题。
+- 想说就说；不想说话了就调用 stayQuiet。
 `)
 	return b.String()
 }

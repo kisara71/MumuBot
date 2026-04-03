@@ -19,17 +19,18 @@ type ConcurrencyManager struct {
 	mu             sync.Mutex
 	wg             sync.WaitGroup
 
-	handler func(ref memory.ConversationRef, isMention bool) // 执行函数
+	handler func(ref memory.ConversationRef, isMention bool, fromLoop bool) // 执行函数
 }
 
 // ThinkTask 思考任务
 type ThinkTask struct {
 	Ref       memory.ConversationRef
 	IsMention bool
+	FromLoop  bool
 }
 
 // NewConcurrencyManager 创建并发管理器
-func NewConcurrencyManager(parent context.Context, max int, h func(ref memory.ConversationRef, isMention bool)) *ConcurrencyManager {
+func NewConcurrencyManager(parent context.Context, max int, h func(ref memory.ConversationRef, isMention bool, fromLoop bool)) *ConcurrencyManager {
 	ctx, cancel := context.WithCancel(parent)
 	return &ConcurrencyManager{
 		ctx:            ctx,
@@ -42,7 +43,7 @@ func NewConcurrencyManager(parent context.Context, max int, h func(ref memory.Co
 }
 
 // Submit 提交任务
-func (m *ConcurrencyManager) Submit(ref memory.ConversationRef, isMention bool) {
+func (m *ConcurrencyManager) Submit(ref memory.ConversationRef, isMention bool, fromLoop bool) {
 	if err := m.ctx.Err(); err != nil {
 		return
 	}
@@ -60,6 +61,7 @@ func (m *ConcurrencyManager) Submit(ref memory.ConversationRef, isMention bool) 
 		m.queue = append(m.queue, &ThinkTask{
 			Ref:       ref,
 			IsMention: isMention,
+			FromLoop:  fromLoop,
 		})
 		m.inQueue[ref.ID()] = true
 		zap.L().Debug("并发已满，任务进入队列",
@@ -72,17 +74,17 @@ func (m *ConcurrencyManager) Submit(ref memory.ConversationRef, isMention bool) 
 
 	m.currentRunning++
 	m.wg.Add(1)
-	go m.execute(ref, isMention)
+	go m.execute(ref, isMention, fromLoop)
 }
 
 // execute 执行任务
-func (m *ConcurrencyManager) execute(ref memory.ConversationRef, isMention bool) {
+func (m *ConcurrencyManager) execute(ref memory.ConversationRef, isMention bool, fromLoop bool) {
 	defer m.wg.Done()
 	defer m.Finish()
 	if err := m.ctx.Err(); err != nil {
 		return
 	}
-	m.handler(ref, isMention)
+	m.handler(ref, isMention, fromLoop)
 }
 
 // Finish 任务完成回调
@@ -105,7 +107,7 @@ func (m *ConcurrencyManager) Finish() {
 		// 立即启动
 		m.currentRunning++
 		m.wg.Add(1)
-		go m.execute(task.Ref, task.IsMention)
+		go m.execute(task.Ref, task.IsMention, task.FromLoop)
 		zap.L().Debug("从队列调度任务执行", zap.String("source", string(task.Ref.Source)), zap.String("id", task.Ref.ID()))
 	}
 }
