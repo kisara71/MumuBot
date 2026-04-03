@@ -69,6 +69,7 @@ type Agent struct {
 	// 正在处理中的会话和最后处理时间
 	processing        map[string]bool
 	lastProcessedTime map[string]time.Time
+	lastLoopThinkTime map[string]time.Time
 	processingMu      sync.RWMutex
 
 	wg sync.WaitGroup
@@ -134,6 +135,7 @@ func New(mem *memory.Manager) (*Agent, error) {
 		pendingThinks:     make(map[string]*pendingThink),
 		processing:        make(map[string]bool),
 		lastProcessedTime: make(map[string]time.Time),
+		lastLoopThinkTime: make(map[string]time.Time),
 	}
 
 	zap.L().Info("人格已加载", zap.String("name", a.persona.GetName()))
@@ -677,14 +679,6 @@ func (a *Agent) thinkCycle() {
 
 		lastMsg := msgs[len(msgs)-1]
 
-		// 如果该消息的时间不晚于最后处理时间，说明是旧消息，跳过
-		a.processingMu.RLock()
-		lastTime := a.lastProcessedTime[ref.ID()]
-		a.processingMu.RUnlock()
-		if !lastTime.IsZero() && lastMsg.Time.Before(lastTime) {
-			continue
-		}
-
 		// 如果最后一条消息是自己发的，跳过
 		if lastMsg.UserID == a.bot.GetSelfID() {
 			continue
@@ -708,27 +702,40 @@ func (a *Agent) thinkCycle() {
 
 	for _, uc := range cfg.Users {
 		if !uc.Enabled {
+			zap.L().Debug("私聊 loop 跳过：用户未启用", zap.Int64("user_id", uc.UserID))
 			continue
 		}
 		ref := memory.PrivateConversationRef(uc.UserID)
 		msgs := a.getBuffer(ref)
 		if len(msgs) == 0 {
+			zap.L().Debug("私聊 loop 跳过：没有缓冲消息", zap.String("id", ref.ID()))
 			continue
 		}
 
-		lastMsg := msgs[len(msgs)-1]
-
 		a.processingMu.RLock()
-		lastTime := a.lastProcessedTime[ref.ID()]
+		lastLoopAt := a.lastLoopThinkTime[ref.ID()]
 		a.processingMu.RUnlock()
-		if !lastTime.IsZero() && lastMsg.Time.Before(lastTime) {
+		if !lastLoopAt.IsZero() && time.Since(lastLoopAt) < time.Duration(cfg.Agent.ThinkInterval)*time.Second {
+			zap.L().Debug("私聊 loop 跳过：冷却中",
+				zap.String("id", ref.ID()),
+				zap.Duration("since_last_loop", time.Since(lastLoopAt)),
+				zap.Duration("cooldown", time.Duration(cfg.Agent.ThinkInterval)*time.Second))
 			continue
 		}
 
 		speakProb := a.getPrivateSpeakProbability(ref)
-		if rand.Float64() > speakProb {
+		roll := rand.Float64()
+		if roll > speakProb {
+			zap.L().Debug("私聊 loop 未命中发言概率",
+				zap.String("id", ref.ID()),
+				zap.Float64("prob", speakProb),
+				zap.Float64("roll", roll))
 			continue
 		}
+		zap.L().Debug("私聊 loop 命中发言概率",
+			zap.String("id", ref.ID()),
+			zap.Float64("prob", speakProb),
+			zap.Float64("roll", roll))
 		a.scheduleThink(ref, false, true)
 	}
 }
@@ -972,7 +979,11 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool)
 	}
 	a.processing[refID] = true
 	lastProcessedTime := a.lastProcessedTime[refID]
-	a.lastProcessedTime[refID] = time.Now()
+	if fromLoop {
+		a.lastLoopThinkTime[refID] = time.Now()
+	} else {
+		a.lastProcessedTime[refID] = time.Now()
+	}
 	a.processingMu.Unlock()
 
 	defer func() {
