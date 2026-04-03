@@ -473,11 +473,15 @@ func (c *Client) parseUserMessage(event map[string]interface{}) *Message {
 	//	commmon message
 	c.parseCommonMessage(event, msg)
 
-	// 	发送者信息
+	// 私聊会话对象
+	if userID, ok := parseInt64(event["user_id"]); ok && userID > 0 {
+		msg.ConversationID = conversation.PrivateConversationRef(userID).ID()
+	}
+
+	// 发送者信息
 	if sender, ok := event["sender"].(map[string]interface{}); ok {
 		if userID, ok := parseInt64(sender["user_id"]); ok {
 			msg.UserID = userID
-			msg.ConversationID = conversation.PrivateConversationRef(userID).ID()
 		}
 		if nickname, ok := sender["nickname"].(string); ok {
 			msg.Nickname = nickname
