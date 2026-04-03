@@ -43,7 +43,7 @@ func getUncheckedStyleCardsFunc(ctx context.Context, input *GetUncheckedStyleCar
 		limit = 5
 	}
 
-	cards, err := lc.MemMgr.ListUncheckedStyleCards(lc.GroupID, limit)
+	cards, err := lc.MemMgr.ListUncheckedStyleCards(lc.ConversationRef.GroupID, limit)
 	if err != nil {
 		return &GetUncheckedStyleCardsOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -152,14 +152,15 @@ func saveStyleCardFunc(ctx context.Context, input *SaveStyleCardInput) (*SaveSty
 	}
 
 	created, err := lc.MemMgr.SaveStyleCardCandidate(ctx, &memory.StyleCard{
-		GroupID:       lc.GroupID,
-		Intent:        input.Intent,
-		Tone:          input.Tone,
-		TriggerRule:   input.TriggerRule,
-		AvoidRule:     input.AvoidRule,
-		Example:       input.Example,
-		SourceExcerpt: input.SourceExcerpt,
-		Status:        memory.StyleCardStatusCandidate,
+		ConversationID: GetConversationID(ctx),
+		GroupID:        lc.ConversationRef.GroupID,
+		Intent:         input.Intent,
+		Tone:           input.Tone,
+		TriggerRule:    input.TriggerRule,
+		AvoidRule:      input.AvoidRule,
+		Example:        input.Example,
+		SourceExcerpt:  input.SourceExcerpt,
+		Status:         memory.StyleCardStatusCandidate,
 	})
 	if err != nil {
 		return &SaveStyleCardOutput{Success: false, Message: err.Error()}, nil
@@ -209,7 +210,7 @@ func searchStyleCardsFunc(ctx context.Context, input *SearchStyleCardsInput) (*S
 		limit = 10
 	}
 
-	cards, err := tc.MemoryMgr.SearchStyleCards(tc.GroupID, input.Keyword, limit)
+	cards, err := tc.MemoryMgr.SearchStyleCards(tc.ConversationRef.GroupID, input.Keyword, limit)
 	if err != nil {
 		return &SearchStyleCardsOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -224,7 +225,7 @@ func searchStyleCardsFunc(ctx context.Context, input *SearchStyleCardsInput) (*S
 			"avoid_rule":         card.AvoidRule,
 			"example":            card.Example,
 			"evidence_count":     card.EvidenceCount,
-			"from_current_group": card.GroupID == tc.GroupID,
+			"from_current_group": card.GroupID == tc.ConversationRef.GroupID,
 		})
 	}
 

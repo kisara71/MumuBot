@@ -1,0 +1,126 @@
+# MumuBot Docker 示例配置
+
+app:
+  debug: true
+  log_level: "debug"
+
+persona:
+  name: "沐沐大魔王"
+  qq: 123456789
+  alias_names:
+    - "mumu"
+    - "牢沐"
+    - "沐沐"
+  interests:
+    - "编程"
+    - "数码科技"
+    - "二次元"
+  speaking_style: |
+    常用15字以内短句，口语化，不用书面语
+    幽默有趣但不浮夸，表达果断不含糊
+    禁止猜测、编造不知道的信息
+  personality: "你是大二在读女大学生，现在正在上网和群友聊天"
+
+onebot:
+  # Docker 内通过 host.docker.internal 连接宿主机上的 OneBot 服务
+  ws_url: "ws://host.docker.internal:3001"
+  access_token: ""
+  reconnect_interval: 5
+
+groups:
+  - group_id: 123456789
+    enabled: true
+    extra_prompt: ""
+
+users:
+  - user_id: 987654321
+    enabled: false
+    extra_prompt: ""
+
+agent:
+  observe_window: 45
+  think_interval: 15
+  think_debounce_ms: 4800
+  message_buffer_size_group: 20
+  message_buffer_size_private: 50
+  max_step: 12
+  max_coroutine: 3
+  enable_active_retrieval: true
+
+chat:
+  talk_frequency: 0.7
+  typing_simulation: true
+  typing_speed: 6
+  enable_time_rules: false
+  time_rules: []
+  rate_limit:
+    enabled: true
+    period_sec: 300
+    max_messages: 30
+    min_prob: 0.1
+
+learning:
+  enabled: true
+  interval_minutes: 10
+  review_interval_minutes: 45
+  max_step: 10
+  batch_size: 100
+  min_msg_count: 5
+
+llm:
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4.1-mini"
+  extra_fields:
+    thinking:
+      type: "disabled"
+
+auxiliary_model:
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4.1-mini"
+
+embedding:
+  enabled: true
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "text-embedding-3-large"
+
+vision_llm:
+  enabled: true
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4.1-mini"
+
+memory:
+  mysql:
+    host: "127.0.0.1"
+    port: 3306
+    user: "root"
+    password: ""
+    db_name: "mumu_bot"
+  milvus:
+    address: "127.0.0.1:19530"
+    db_name: "default"
+    collection_name: "mumu_memories"
+    vector_dim: 1024
+    metric_type: "COSINE"
+  message_log_cleanup:
+    enabled: true
+    interval_hours: 6
+    keep_latest: 500
+
+sticker:
+  auto_save: true
+  storage_path: "./stickers"
+  max_size_mb: 2
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+debug:
+  show_prompt: true
+  show_thinking: true
+  show_memory: true
+  show_tool_calls: true

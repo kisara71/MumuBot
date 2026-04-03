@@ -18,6 +18,7 @@ type Config struct {
 	Persona        PersonaConfig   `yaml:"persona"`
 	OneBot         OneBotConfig    `yaml:"onebot"`
 	Groups         []GroupConfig   `yaml:"groups"`
+	Users          []UserConfig    `yaml:"users"`
 	Agent          AgentConfig     `yaml:"agent"`
 	Chat           ChatConfig      `yaml:"chat"`     // 聊天行为配置
 	Learning       LearningConfig  `yaml:"learning"` // 学习系统配置
@@ -61,15 +62,23 @@ type GroupConfig struct {
 	ExtraPrompt string `yaml:"extra_prompt"` // 群专属额外提示词
 }
 
+// UserConfig 私聊配置
+type UserConfig struct {
+	UserID      int64  `yaml:"user_id"`
+	Enabled     bool   `yaml:"enabled"`
+	ExtraPrompt string `yaml:"extra_prompt"`
+}
+
 // AgentConfig Agent决策配置
 type AgentConfig struct {
-	ObserveWindow         int  `yaml:"observe_window"`          // 观察窗口时间（秒）
-	ThinkInterval         int  `yaml:"think_interval"`          // 决策间隔（秒）
-	ThinkDebounceMS       int  `yaml:"think_debounce_ms"`       // 思考聚合窗口（毫秒）
-	MessageBufferSize     int  `yaml:"message_buffer_size"`     // 消息缓冲区大小
-	MaxStep               int  `yaml:"max_step"`                // ReAct 最大步数
-	MaxCoroutine          int  `yaml:"max_coroutine"`           // 最大并发思考进程数（0表示不限制）
-	EnableActiveRetrieval bool `yaml:"enable_active_retrieval"` // 是否启用主动记忆检索（阈值固定0.7）
+	ObserveWindow            int  `yaml:"observe_window"`              // 观察窗口时间（秒）
+	ThinkInterval            int  `yaml:"think_interval"`              // 决策间隔（秒）
+	ThinkDebounceMS          int  `yaml:"think_debounce_ms"`           // 思考聚合窗口（毫秒）
+	MessageBufferSizeGroup   int  `yaml:"message_buffer_size_group"`   // 消息缓冲区大小(群聊)
+	MessageBufferSizePrivate int  `yaml:"message_buffer_size_private"` // 消息缓冲区大小(私聊)
+	MaxStep                  int  `yaml:"max_step"`                    // ReAct 最大步数
+	MaxCoroutine             int  `yaml:"max_coroutine"`               // 最大并发思考进程数（0表示不限制）
+	EnableActiveRetrieval    bool `yaml:"enable_active_retrieval"`     // 是否启用主动记忆检索（阈值固定0.7）
 }
 
 // ChatConfig 聊天行为配置
@@ -261,4 +270,16 @@ func (c *Config) GetGroupConfig(groupID int64) *GroupConfig {
 func (c *Config) IsGroupEnabled(groupID int64) bool {
 	gc := c.GetGroupConfig(groupID)
 	return gc != nil && gc.Enabled
+}
+func (c *Config) GetUserConfig(userID int64) *UserConfig {
+	for i := range c.Users {
+		if c.Users[i].UserID == userID {
+			return &c.Users[i]
+		}
+	}
+	return nil
+}
+func (c *Config) IsUserEnabled(userID int64) bool {
+	uc := c.GetUserConfig(userID)
+	return uc != nil && uc.Enabled
 }

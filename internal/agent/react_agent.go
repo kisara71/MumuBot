@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/jargon"
 	"mumu-bot/internal/learning"
 	"mumu-bot/internal/llm"
@@ -16,6 +18,7 @@ import (
 	"mumu-bot/internal/tools"
 	"mumu-bot/internal/utils"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,17 +58,18 @@ type Agent struct {
 	jargonMgr *jargon.Manager   // 黑话管理器
 	learner   *learning.Learner // 后台学习系统
 
-	// 消息缓冲（使用 ring buffer 避免扩容缩容开销）
-	buffers   map[int64]*utils.RingBuffer[*onebot.GroupMessage]
-	buffersMu sync.RWMutex // 保护 map 本身的并发访问
+	// 消息缓冲
+	buffers   map[string]*utils.RingBuffer[*onebot.Message]
+	buffersMu sync.RWMutex
 
 	// 思考聚合窗口
-	pendingThinks map[int64]*pendingThink
+	pendingThinks map[string]*pendingThink
 	pendingMu     sync.Mutex
 
-	// 正在处理中的群组（防止重复思考）和最后处理时间
-	processing        map[int64]bool
-	lastProcessedTime map[int64]time.Time
+	// 正在处理中的会话和最后处理时间
+	processing        map[string]bool
+	lastProcessedTime map[string]time.Time
+	lastLoopThinkTime map[string]time.Time
 	processingMu      sync.RWMutex
 
 	wg sync.WaitGroup
@@ -74,7 +78,18 @@ type Agent struct {
 type pendingThink struct {
 	timer      *time.Timer
 	isMention  bool
+	fromLoop   bool
 	generation uint64
+}
+
+func messageConversationRef(msg *onebot.Message) memory.ConversationRef {
+	if msg == nil {
+		return memory.AllConversationRef()
+	}
+	if ref, ok := conversation.ParseRefID(msg.ConversationID); ok {
+		return ref
+	}
+	return memory.AllConversationRef()
 }
 
 // New 创建 Agent
@@ -116,10 +131,11 @@ func New(mem *memory.Manager) (*Agent, error) {
 		model:             chatModel,
 		vision:            visionClient,
 		bot:               botClient,
-		buffers:           make(map[int64]*utils.RingBuffer[*onebot.GroupMessage]),
-		pendingThinks:     make(map[int64]*pendingThink),
-		processing:        make(map[int64]bool),
-		lastProcessedTime: make(map[int64]time.Time),
+		buffers:           make(map[string]*utils.RingBuffer[*onebot.Message]),
+		pendingThinks:     make(map[string]*pendingThink),
+		processing:        make(map[string]bool),
+		lastProcessedTime: make(map[string]time.Time),
+		lastLoopThinkTime: make(map[string]time.Time),
 	}
 
 	zap.L().Info("人格已加载", zap.String("name", a.persona.GetName()))
@@ -299,56 +315,76 @@ func (a *Agent) Start() {
 // loadBuffersFromDB 从数据库加载消息日志到缓冲区
 func (a *Agent) loadBuffersFromDB() {
 	cfg := config.Get()
+	//	群聊
+	zap.L().Info("加载群聊信息...")
 	for _, gc := range cfg.Groups {
 		if !gc.Enabled {
 			continue
 		}
-
-		// 获取缓冲区大小
-		bufSize := cfg.Agent.MessageBufferSize
-		if bufSize <= 0 {
-			bufSize = 15
-		}
-
-		// 从数据库获取最近的消息
-		logs := a.memory.GetRecentMessages(gc.GroupID, bufSize, 0)
+		logs := a.memory.GetRecentMessages(memory.GroupConversationRef(gc.GroupID), cfg.Agent.MessageBufferSizeGroup, 0)
 		if len(logs) == 0 {
 			continue
 		}
-
-		// 初始化缓冲区
-		a.buffersMu.Lock()
-		buf := utils.NewRingBuffer[*onebot.GroupMessage](bufSize)
-		a.buffers[gc.GroupID] = buf
-
-		// 填充缓冲区
-		for _, log := range logs {
-			msgID, _ := strconv.ParseInt(log.MessageID, 10, 64)
-
-			// 还原合并转发内容
-			var forwards []onebot.ForwardMessage
-			if log.Forwards != "" {
-				_ = sonic.UnmarshalString(log.Forwards, &forwards)
-			}
-
-			msg := &onebot.GroupMessage{
-				MessageID:    msgID,
-				GroupID:      log.GroupID,
-				UserID:       log.UserID,
-				Nickname:     log.Nickname,
-				Content:      log.OriginalContent,
-				FinalContent: log.Content,
-				IsMentioned:  log.IsMentioned,
-				Time:         log.CreatedAt,
-				MessageType:  log.MsgType,
-				Forwards:     forwards,
-			}
-			buf.Push(msg)
-		}
-		a.buffersMu.Unlock()
-
-		zap.L().Info("已从数据库加载消息历史", zap.Int64("group_id", gc.GroupID), zap.Int("count", len(logs)))
+		a.loadMessages(memory.GroupConversationRef(gc.GroupID), cfg.Agent.MessageBufferSizeGroup, logs)
+		zap.L().Info(fmt.Sprintf("群聊:%d加载了%d条信息", gc.GroupID, len(logs)))
 	}
+	zap.L().Info("群聊信息加载完毕")
+
+	//	私聊
+	zap.L().Info("加载私聊信息")
+	for _, uc := range cfg.Users {
+		if !uc.Enabled {
+			continue
+		}
+		logs := a.memory.GetRecentMessages(memory.PrivateConversationRef(uc.UserID), cfg.Agent.MessageBufferSizePrivate, 0)
+		if len(logs) == 0 {
+			continue
+		}
+		a.loadMessages(memory.PrivateConversationRef(uc.UserID), cfg.Agent.MessageBufferSizePrivate, logs)
+		zap.L().Info(fmt.Sprintf("用户:%d加载了%d条信息", uc.UserID, len(logs)))
+	}
+	zap.L().Info("私聊信息加载完毕")
+
+}
+
+func (a *Agent) loadMessages(ref memory.ConversationRef, bufSize int, logs []memory.MessageLog) {
+	// 获取缓冲区大小
+	if bufSize <= 0 {
+		bufSize = 15
+	}
+	// 从数据库获取最近的消息
+	if len(logs) == 0 {
+		return
+	}
+	// 初始化缓冲区
+	a.buffersMu.Lock()
+	buf := utils.NewRingBuffer[*onebot.Message](bufSize)
+	a.buffers[ref.ID()] = buf
+	// 填充缓冲区
+	for _, log := range logs {
+		msgID, _ := strconv.ParseInt(log.MessageID, 10, 64)
+
+		// 还原合并转发内容
+		var forwards []onebot.ForwardMessage
+		if log.Forwards != "" {
+			_ = sonic.UnmarshalString(log.Forwards, &forwards)
+		}
+		msg := &onebot.Message{
+			MessageID:      msgID,
+			ConversationID: ref.ID(),
+			GroupID:        log.GroupID,
+			UserID:         log.UserID,
+			Nickname:       log.Nickname,
+			Content:        log.OriginalContent,
+			FinalContent:   log.Content,
+			IsMentioned:    log.IsMentioned,
+			Time:           log.CreatedAt,
+			MessageSource:  onebot.MessageSource(log.MessageSource),
+			Forwards:       forwards,
+		}
+		buf.Push(msg)
+	}
+	a.buffersMu.Unlock()
 }
 
 // Stop 停止
@@ -372,12 +408,22 @@ func (a *Agent) Stop() {
 	zap.L().Info("Agent 已停止")
 }
 
-func (a *Agent) onMessage(msg *onebot.GroupMessage) {
+func (a *Agent) onMessage(msg *onebot.Message) {
 	if err := a.ctx.Err(); err != nil {
 		return
 	}
 	cfg := config.Get()
-	if !cfg.IsGroupEnabled(msg.GroupID) {
+	switch msg.MessageSource {
+	case onebot.MessageSourceGroup:
+		if !cfg.IsGroupEnabled(msg.GroupID) {
+			return
+		}
+	case onebot.MessageSourcePrivate:
+		if !cfg.IsUserEnabled(msg.UserID) && msg.UserID != a.bot.GetSelfID() {
+			return
+		}
+	default:
+		zap.L().Error("invalid message source", zap.Any("msg", msg))
 		return
 	}
 
@@ -405,12 +451,13 @@ func (a *Agent) onMessage(msg *onebot.GroupMessage) {
 	a.addBuffer(msg)
 	_ = a.memory.AddMessage(memory.MessageLog{
 		MessageID:       fmt.Sprintf("%d", msg.MessageID),
+		ConversationID:  messageConversationRef(msg).ID(),
 		GroupID:         msg.GroupID,
 		UserID:          msg.UserID,
 		Nickname:        msg.Nickname,
 		Content:         msg.FinalContent, // 使用解析后的内容
 		OriginalContent: msg.Content,
-		MsgType:         msg.MessageType,
+		MessageSource:   string(msg.MessageSource),
 		IsMentioned:     isMentioned,
 		CreatedAt:       msg.Time,
 		Forwards:        forwardsJSON,
@@ -429,11 +476,11 @@ func (a *Agent) onMessage(msg *onebot.GroupMessage) {
 		a.updateMember(msg)
 	}()
 
-	a.scheduleThink(msg.GroupID, isMentioned, false)
+	a.scheduleThink(messageConversationRef(msg), isMentioned, false)
 }
 
 // parseMessageContent 解析消息内容（图片、视频、表情、回复等）
-func (a *Agent) parseMessageContent(msg *onebot.GroupMessage) string {
+func (a *Agent) parseMessageContent(msg *onebot.Message) string {
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
 
@@ -518,38 +565,62 @@ func (a *Agent) parseMessageContent(msg *onebot.GroupMessage) string {
 		}
 	}
 
-	var qid string
-	if msg.UserID == config.Get().Persona.QQ {
-		qid = "你"
-	} else {
-		qid = fmt.Sprintf("%d", msg.UserID)
-	}
+	speaker := a.formatMessageSpeaker(msg)
 
 	// 构建完整消息行
-	return fmt.Sprintf("[%s] #%d %s(%s):%s %s\n",
-		msg.Time.Format("15:04:05"), msg.MessageID, msg.Nickname, qid, replyInfo, content)
+	return fmt.Sprintf("[%s] #%d %s:%s %s\n",
+		msg.Time.Format("15:04:05"), msg.MessageID, speaker, replyInfo, content)
 }
 
-func (a *Agent) addBuffer(msg *onebot.GroupMessage) {
-	a.buffersMu.Lock()
-	buf, ok := a.buffers[msg.GroupID]
-	if !ok {
-		// 确保缓冲区大小有效
-		bufSize := config.Get().Agent.MessageBufferSize
-		if bufSize <= 0 {
-			bufSize = 15 // 默认缓冲区大小
-		}
-		buf = utils.NewRingBuffer[*onebot.GroupMessage](bufSize)
-		a.buffers[msg.GroupID] = buf
+func (a *Agent) formatMessageSpeaker(msg *onebot.Message) string {
+	if msg == nil {
+		return "未知"
 	}
-	a.buffersMu.Unlock()
 
+	if msg.UserID == a.bot.GetSelfID() {
+		if name := strings.TrimSpace(a.persona.GetName()); name != "" {
+			return fmt.Sprintf("你(%s)", name)
+		}
+		return "你"
+	}
+
+	name := strings.TrimSpace(msg.Nickname)
+	if name == "" {
+		name = "未知用户"
+	}
+	if msg.MessageSource == onebot.MessageSourcePrivate {
+		return fmt.Sprintf("对方(%s,%d)", name, msg.UserID)
+	}
+	return fmt.Sprintf("%s(%d)", name, msg.UserID)
+}
+
+func (a *Agent) addBuffer(msg *onebot.Message) {
+	ref := messageConversationRef(msg)
+	if ref.ID() == "" {
+		zap.L().Error("消息缺少有效会话信息", zap.Any("msg", msg))
+		return
+	}
+	a.buffersMu.Lock()
+	defer a.buffersMu.Unlock()
+	buf, ok := a.buffers[ref.ID()]
+	if !ok {
+		bufSize := config.Get().Agent.MessageBufferSizeGroup
+		if ref.IsPrivate() {
+			bufSize = config.Get().Agent.MessageBufferSizePrivate
+			if bufSize <= 0 {
+				bufSize = 50
+			}
+		} else if bufSize <= 0 {
+			bufSize = 15
+		}
+		buf = utils.NewRingBuffer[*onebot.Message](bufSize)
+		a.buffers[ref.ID()] = buf
+	}
 	buf.Push(msg)
 }
-
-func (a *Agent) getBuffer(groupID int64) []*onebot.GroupMessage {
+func (a *Agent) getBuffer(ref memory.ConversationRef) []*onebot.Message {
 	a.buffersMu.RLock()
-	buf, ok := a.buffers[groupID]
+	buf, ok := a.buffers[ref.ID()]
 	a.buffersMu.RUnlock()
 
 	if !ok || buf.IsEmpty() {
@@ -558,26 +629,31 @@ func (a *Agent) getBuffer(groupID int64) []*onebot.GroupMessage {
 	return buf.GetAll()
 }
 
-func (a *Agent) updateMember(msg *onebot.GroupMessage) {
+func (a *Agent) updateMember(msg *onebot.Message) {
 	if err := a.ctx.Err(); err != nil {
 		return
 	}
 	p, err := a.memory.GetOrCreateMemberProfile(msg.UserID, msg.Nickname)
 	if err != nil {
-		zap.L().Error("获取成员画像失败", zap.Error(err))
+		zap.L().Error("获取用户画像失败", zap.Error(err))
 		return
 	}
 	p.MsgCount++
 	p.LastSpeak = msg.Time
 	p.Nickname = msg.Nickname
-	if err := a.memory.UpdateMemberProfile(p); err != nil {
-		zap.L().Error("更新成员画像失败", zap.Error(err))
+	if err := a.memory.UpdateUserProfile(p); err != nil {
+		zap.L().Error("更新用户画像失败", zap.Error(err))
 	}
 }
 
 func (a *Agent) thinkLoop() {
 	defer a.wg.Done()
-	ticker := time.NewTicker(time.Duration(config.Get().Agent.ThinkInterval) * time.Second)
+	interval := time.Duration(config.Get().Agent.ThinkInterval) * time.Second
+	zap.L().Info("思考循环已启动",
+		zap.Duration("interval", interval),
+		zap.Int("groups", len(config.Get().Groups)),
+		zap.Int("users", len(config.Get().Users)))
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -595,20 +671,13 @@ func (a *Agent) thinkCycle() {
 		if !gc.Enabled {
 			continue
 		}
-		msgs := a.getBuffer(gc.GroupID)
+		ref := memory.GroupConversationRef(gc.GroupID)
+		msgs := a.getBuffer(ref)
 		if len(msgs) == 0 {
 			continue
 		}
 
 		lastMsg := msgs[len(msgs)-1]
-
-		// 如果该消息的时间不晚于最后处理时间，说明是旧消息，跳过
-		a.processingMu.RLock()
-		lastTime := a.lastProcessedTime[gc.GroupID]
-		a.processingMu.RUnlock()
-		if !lastTime.IsZero() && lastMsg.Time.Before(lastTime) {
-			continue
-		}
 
 		// 如果最后一条消息是自己发的，跳过
 		if lastMsg.UserID == a.bot.GetSelfID() {
@@ -624,77 +693,119 @@ func (a *Agent) thinkCycle() {
 			continue
 		}
 		// 获取当前的发言概率（考虑时段规则）
-		speakProb := a.getSpeakProbability(gc.GroupID)
+		speakProb := a.getSpeakProbability(ref)
 		if rand.Float64() > speakProb {
 			continue
 		}
-		a.scheduleThink(gc.GroupID, false, true)
+		a.scheduleThink(ref, false, true)
+	}
+
+	for _, uc := range cfg.Users {
+		if !uc.Enabled {
+			zap.L().Debug("私聊 loop 跳过：用户未启用", zap.Int64("user_id", uc.UserID))
+			continue
+		}
+		ref := memory.PrivateConversationRef(uc.UserID)
+		msgs := a.getBuffer(ref)
+		if len(msgs) == 0 {
+			zap.L().Debug("私聊 loop 跳过：没有缓冲消息", zap.String("id", ref.ID()))
+			continue
+		}
+
+		a.processingMu.RLock()
+		lastLoopAt := a.lastLoopThinkTime[ref.ID()]
+		a.processingMu.RUnlock()
+		if !lastLoopAt.IsZero() && time.Since(lastLoopAt) < time.Duration(cfg.Agent.ThinkInterval)*time.Second {
+			zap.L().Debug("私聊 loop 跳过：冷却中",
+				zap.String("id", ref.ID()),
+				zap.Duration("since_last_loop", time.Since(lastLoopAt)),
+				zap.Duration("cooldown", time.Duration(cfg.Agent.ThinkInterval)*time.Second))
+			continue
+		}
+
+		speakProb := a.getPrivateSpeakProbability(ref)
+		roll := rand.Float64()
+		if roll > speakProb {
+			zap.L().Debug("私聊 loop 未命中发言概率",
+				zap.String("id", ref.ID()),
+				zap.Float64("prob", speakProb),
+				zap.Float64("roll", roll))
+			continue
+		}
+		zap.L().Debug("私聊 loop 命中发言概率",
+			zap.String("id", ref.ID()),
+			zap.Float64("prob", speakProb),
+			zap.Float64("roll", roll))
+		a.scheduleThink(ref, false, true)
 	}
 }
 
-func (a *Agent) scheduleThink(groupID int64, isMention bool, fromLoop bool) {
+func (a *Agent) scheduleThink(ref memory.ConversationRef, isMention bool, fromLoop bool) {
 	debounce := time.Duration(config.Get().Agent.ThinkDebounceMS) * time.Millisecond
 
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
-	if pending, ok := a.pendingThinks[groupID]; ok {
+	if pending, ok := a.pendingThinks[ref.ID()]; ok {
 		pending.isMention = pending.isMention || isMention
+		pending.fromLoop = pending.fromLoop || fromLoop
 		pending.generation++
 		gen := pending.generation
 		pending.timer = time.AfterFunc(debounce, func() {
-			a.flushPendingThink(groupID, gen)
+			a.flushPendingThink(ref, gen)
 		})
 		return
 	}
 
-	if !fromLoop && !isMention {
+	if !fromLoop && !isMention && !ref.IsPrivate() {
 		return
 	}
 
 	pending := &pendingThink{
 		isMention:  isMention,
+		fromLoop:   fromLoop,
 		generation: 1,
 	}
 	gen := pending.generation
 	pending.timer = time.AfterFunc(debounce, func() {
-		a.flushPendingThink(groupID, gen)
+		a.flushPendingThink(ref, gen)
 	})
-	a.pendingThinks[groupID] = pending
+	a.pendingThinks[ref.ID()] = pending
 }
 
-func (a *Agent) flushPendingThink(groupID int64, generation uint64) {
+func (a *Agent) flushPendingThink(ref memory.ConversationRef, generation uint64) {
 	a.pendingMu.Lock()
-	pending, ok := a.pendingThinks[groupID]
+	pending, ok := a.pendingThinks[ref.ID()]
 	if !ok || pending.generation != generation {
 		a.pendingMu.Unlock()
 		return
 	}
 
 	isMention := pending.isMention
-	delete(a.pendingThinks, groupID)
+	fromLoop := pending.fromLoop
+	delete(a.pendingThinks, ref.ID())
 	a.pendingMu.Unlock()
 
-	a.concurrencyMgr.Submit(groupID, isMention)
+	a.concurrencyMgr.Submit(ref, isMention, fromLoop)
 }
 
 func (a *Agent) clearPendingThinks() {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
 
-	for groupID, pending := range a.pendingThinks {
+	for key, pending := range a.pendingThinks {
 		if pending.timer != nil {
 			pending.timer.Stop()
 		}
-		delete(a.pendingThinks, groupID)
+		delete(a.pendingThinks, key)
 	}
 }
 
 // getSpeakProbability 获取发言概率（考虑时段规则）
-func (a *Agent) getSpeakProbability(groupID int64) float64 {
+func (a *Agent) getSpeakProbability(ref memory.ConversationRef) float64 {
 	cfg := config.Get()
 	baseProb := cfg.Chat.TalkFrequency
 	// 如果启用了时段规则，则根据当前时间调整概率
-	if cfg.Chat.EnableTimeRules && len(cfg.Chat.TimeRules) > 0 {
+	if ref.IsGroup() && cfg.Chat.EnableTimeRules && len(cfg.Chat.TimeRules) > 0 {
 		now := time.Now()
 		hour := now.Hour()
 		minute := now.Minute()
@@ -702,7 +813,7 @@ func (a *Agent) getSpeakProbability(groupID int64) float64 {
 
 		for _, rule := range cfg.Chat.TimeRules {
 			// 检查是否适用于当前群（0表示全局）
-			if rule.GroupID != 0 && rule.GroupID != groupID {
+			if rule.GroupID != 0 && rule.GroupID != ref.GroupID {
 				continue
 			}
 			// 解析时间范围
@@ -730,11 +841,57 @@ func (a *Agent) getSpeakProbability(groupID int64) float64 {
 		}
 	}
 
-	// 防话痨限流逻辑
+	return a.applyGroupRateLimitProbability(ref, baseProb)
+}
+
+func (a *Agent) getPrivateSpeakProbability(ref memory.ConversationRef) float64 {
+	// 私聊主动发起比群聊更保守，先按时段给一个基础值，避免深夜打扰。
+	baseProb := 0.28
+	now := time.Now()
+	hour := now.Hour()
+
+	switch {
+	case hour >= 0 && hour < 8:
+		baseProb = 0.03
+	case hour >= 8 && hour < 11:
+		baseProb = 0.18
+	case hour >= 11 && hour < 18:
+		baseProb = 0.24
+	case hour >= 18 && hour < 22:
+		baseProb = 0.32
+	case hour >= 22 && hour < 24:
+		baseProb = 0.10
+	}
+
+	relationFactor := 0.55
+	if profile, err := a.memory.GetMemberProfile(ref.UserID); err == nil && profile != nil {
+		// 关系越近越容易主动找对方；respect 作为负增益，表示更克制、不想打扰。
+		relationFactor = 0.25 +
+			0.45*profile.Intimacy +
+			0.30*profile.Familiarity +
+			0.15*profile.Trust -
+			0.15*profile.Respect
+		relationFactor = utils.ClampFloat64(relationFactor, 0.10, 0.95)
+	}
+
+	moodFactor := 0.75
+	if mood, err := a.memory.GetMoodState(ref.UserID); err == nil && mood != nil {
+		// 当下的社交意愿/好奇心会放大主动概率，烦躁会压低它。
+		moodFactor = 0.45 +
+			0.35*mood.Sociability +
+			0.20*mood.Curiosity -
+			0.30*mood.Irritation
+		moodFactor = utils.ClampFloat64(moodFactor, 0.10, 1.00)
+	}
+
+	return a.applyPrivateRateLimitProbability(ref, baseProb*relationFactor*moodFactor)
+}
+
+func (a *Agent) applyGroupRateLimitProbability(ref memory.ConversationRef, baseProb float64) float64 {
 	limitCfg := config.Get().Chat.RateLimit
 	if limitCfg.Enabled && limitCfg.PeriodSec > 0 && limitCfg.MaxMessages > 0 {
 		startTime := time.Now().Add(-time.Duration(limitCfg.PeriodSec) * time.Second)
-		count, err := a.memory.GetMessageCountByTime(groupID, a.bot.GetSelfID(), startTime)
+		count, err := a.memory.GetMessageCountByTime(ref, a.bot.GetSelfID(), startTime)
 		if err == nil {
 			maxMsgs := float64(limitCfg.MaxMessages)
 			current := float64(count)
@@ -752,14 +909,15 @@ func (a *Agent) getSpeakProbability(groupID int64) float64 {
 			oldProb := baseProb
 			baseProb *= decay
 
-			// 最小保底检查
-			minProb := utils.ClampFloat64(limitCfg.MinProb, 0, 1)
+			// 保底概率不能把本来更低的基础概率反向抬高。
+			minProb := utils.ClampFloat64(math.Min(limitCfg.MinProb, oldProb), 0, 1)
 			baseProb = utils.ClampFloat64(baseProb, minProb, 1)
 
 			// 仅在触发衰减时打印日志
 			if decay < 1.0 {
 				zap.L().Debug("触发防话痨限制",
-					zap.Int64("group_id", groupID),
+					zap.String("source", string(ref.Source)),
+					zap.String("id", ref.ID()),
 					zap.Int64("recent_msgs", count),
 					zap.Float64("decay", decay),
 					zap.Float64("original_prob", oldProb),
@@ -771,66 +929,109 @@ func (a *Agent) getSpeakProbability(groupID int64) float64 {
 	return baseProb
 }
 
+func (a *Agent) applyPrivateRateLimitProbability(ref memory.ConversationRef, baseProb float64) float64 {
+	// 私聊单独限流：只看当前用户会话，且比群聊宽松，避免正常往返被过早压住。
+	startTime := time.Now().Add(-20 * time.Minute)
+	count, err := a.memory.GetMessageCountByTime(ref, a.bot.GetSelfID(), startTime)
+	if err != nil {
+		return utils.ClampFloat64(baseProb, 0, 1)
+	}
+
+	oldProb := baseProb
+	switch {
+	case count >= 16:
+		baseProb *= 0.10
+	case count >= 12:
+		baseProb *= 0.30
+	case count >= 9:
+		baseProb *= 0.55
+	case count >= 6:
+		baseProb *= 0.80
+	default:
+		return utils.ClampFloat64(baseProb, 0, 1)
+	}
+
+	// 私聊仍保留很低的兜底概率，避免彻底锁死某个会话。
+	baseProb = utils.ClampFloat64(baseProb, math.Min(0.02, oldProb), 1)
+	zap.L().Debug("触发私聊限流",
+		zap.String("source", string(ref.Source)),
+		zap.String("id", ref.ID()),
+		zap.Int64("recent_msgs", count),
+		zap.Float64("original_prob", oldProb),
+		zap.Float64("new_prob", baseProb))
+	return baseProb
+}
+
 // think 提交思考任务
-func (a *Agent) think(groupID int64, isMention bool) {
+func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool) {
 	if err := a.ctx.Err(); err != nil {
 		return
 	}
-	if a.bot.IsSelfMuted(groupID) {
+	if ref.IsGroup() && a.bot.IsSelfMuted(ref.GroupID) {
 		return
 	}
 	// 并发锁：确保同一时间一个群只有一个思考进程
+	refID := ref.ID()
 	a.processingMu.Lock()
-	if a.processing[groupID] {
+	if a.processing[refID] {
 		a.processingMu.Unlock()
 		return
 	}
-	a.processing[groupID] = true
-	lastProcessedTime := a.lastProcessedTime[groupID]
-	a.lastProcessedTime[groupID] = time.Now()
+	a.processing[refID] = true
+	lastProcessedTime := a.lastProcessedTime[refID]
+	if fromLoop {
+		a.lastLoopThinkTime[refID] = time.Now()
+	} else {
+		a.lastProcessedTime[refID] = time.Now()
+	}
 	a.processingMu.Unlock()
 
 	defer func() {
 		a.processingMu.Lock()
-		a.processing[groupID] = false
+		a.processing[refID] = false
 		a.processingMu.Unlock()
 	}()
 
 	ctx := tools.WithToolContext(a.ctx, &tools.ToolContext{
-		GroupID:   groupID,
-		MemoryMgr: a.memory,
-		Bot:       a.bot,
-		SpeakCallback: func(callCtx context.Context, gid int64, content string, replyTo int64, mentions []int64) (int64, error) {
-			return a.doSpeak(callCtx, gid, content, replyTo, mentions)
+		ConversationRef: ref,
+		MemoryMgr:       a.memory,
+		Bot:             a.bot,
+		SpeakCallback: func(callCtx context.Context, callRef conversation.Ref, content string, replyTo int64, mentions []int64) (int64, error) {
+			return a.doSpeak(callCtx, callRef, content, replyTo, mentions)
 		},
-		SendStickerCallback: func(callCtx context.Context, gid int64, filePath string, description string) (int64, error) {
-			return a.doSendSticker(callCtx, gid, filePath, description)
+		SendStickerCallback: func(callCtx context.Context, callRef conversation.Ref, filePath string, description string) (int64, error) {
+			return a.doSendSticker(callCtx, callRef, filePath, description)
 		},
 	})
 
 	// 构建对话上下文
-	chatContext := a.buildChatContext(groupID, lastProcessedTime)
+	chatContext := a.buildChatContext(ref, lastProcessedTime)
 	if chatContext == "" {
 		return
 	}
 
 	// 构建动态 prompt 上下文
 	promptCtx := &persona.PromptContext{
-		GroupID: groupID,
+		Ref: ref,
 	}
-	promptCtx.GroupInfo = a.buildGroupContext(groupID)
-
+	if fromLoop {
+		promptCtx.LoopInfo = a.buildLoopContext(ref)
+	}
 	// 主动记忆检索
 	if config.Get().Agent.EnableActiveRetrieval {
-		promptCtx.RelatedMemories, promptCtx.CrossGroupExperiences = a.buildMemoryContext(ctx, groupID)
+		promptCtx.RelatedMemories, promptCtx.CrossGroupExperiences = a.buildMemoryContext(ctx, ref)
 	}
 
-	// 获取当前情绪状态
-	if mood, err := a.memory.GetMoodState(); err == nil {
-		promptCtx.MoodState = &persona.MoodInfo{
-			Valence:     mood.Valence,
-			Energy:      mood.Energy,
-			Sociability: mood.Sociability,
+	// 获取当前目标用户的情绪状态
+	if targetUserID := a.resolveMoodTargetUserID(ref); targetUserID > 0 {
+		if mood, err := a.memory.GetMoodState(targetUserID); err == nil {
+			promptCtx.MoodState = &persona.MoodInfo{
+				Valence:     mood.Valence,
+				Energy:      mood.Energy,
+				Sociability: mood.Sociability,
+				Irritation:  mood.Irritation,
+				Curiosity:   mood.Curiosity,
+			}
 		}
 	}
 
@@ -838,22 +1039,36 @@ func (a *Agent) think(groupID int64, isMention bool) {
 	if a.jargonMgr != nil {
 		promptCtx.JargonMatches = a.jargonMgr.Match(chatContext)
 	}
-	promptCtx.StyleHints = a.buildStyleHintContext(ctx, groupID)
-
-	// 获取最近在场的人
-	recentPeople := a.buildRecentPeopleContext(groupID)
-
-	// 构建消息
-	systemPrompt := a.persona.GetSystemPrompt()
-
-	// 添加群专属额外提示词
-	groupExtra := ""
-	if gc := config.Get().GetGroupConfig(groupID); gc != nil && gc.ExtraPrompt != "" {
-		groupExtra = gc.ExtraPrompt
+	if ref.IsGroup() {
+		promptCtx.GroupInfo = a.buildGroupContext(ref)
+		promptCtx.StyleHints = a.buildStyleHintContext(ctx, ref)
+	} else if ref.IsPrivate() {
+		promptCtx.PeerInfo = a.buildPrivatePeerContext(ref)
 	}
 
-	thinkPrompt := a.persona.GetThinkPrompt(promptCtx, chatContext, groupExtra, recentPeople)
-	if isMention {
+	// 获取最近在场的人
+	recentPeople := ""
+	if ref.IsGroup() {
+		recentPeople = a.buildRecentPeopleContext(ref)
+	}
+
+	// 构建消息
+	systemPrompt := a.persona.GetSystemPrompt(ref)
+
+	// 添加专属额外提示词
+	extraPrompt := ""
+	if ref.IsGroup() {
+		if gc := config.Get().GetGroupConfig(ref.GroupID); gc != nil && gc.ExtraPrompt != "" {
+			extraPrompt = gc.ExtraPrompt
+		}
+	} else if ref.IsPrivate() {
+		if uc := config.Get().GetUserConfig(ref.UserID); uc != nil && uc.ExtraPrompt != "" {
+			extraPrompt = uc.ExtraPrompt
+		}
+	}
+
+	thinkPrompt := a.persona.GetThinkPrompt(promptCtx, chatContext, extraPrompt, recentPeople)
+	if isMention && ref.IsGroup() {
 		thinkPrompt += "\n\n注意：有人提到你了，可能在找你说话，你可以看情况回复。"
 	}
 
@@ -881,31 +1096,80 @@ func (a *Agent) think(groupID int64, isMention bool) {
 	if err != nil {
 		// 区分是超时还是主动取消（stayQuiet）
 		if errors.Is(ctxWithTimeout.Err(), context.DeadlineExceeded) {
-			zap.L().Warn("思考超时", zap.Int64("group_id", groupID), zap.Duration("timeout", agentThinkTimeout))
+			zap.L().Warn("思考超时", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Duration("timeout", agentThinkTimeout))
 		} else if errors.Is(ctxWithTimeout.Err(), context.Canceled) || errors.Is(a.ctx.Err(), context.Canceled) {
-			zap.L().Debug("思考已取消", zap.Int64("group_id", groupID))
+			zap.L().Debug("思考已取消", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()))
 		} else {
-			zap.L().Error("思考失败", zap.Int64("group_id", groupID), zap.Error(err))
+			zap.L().Error("思考失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		}
 	}
 
 	// 记录 Agent 输出
 	if config.Get().Debug.ShowThinking && result != nil && result.Content != "" {
-		zap.L().Debug("Agent 输出", zap.Int64("group_id", groupID), zap.String("content", result.Content))
+		zap.L().Debug("Agent 输出", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.String("content", result.Content))
 	}
 }
 
-func (a *Agent) buildGroupContext(groupID int64) string {
-	if a.bot == nil {
+func (a *Agent) buildLoopContext(ref memory.ConversationRef) string {
+	msgs := a.getBuffer(ref)
+	if len(msgs) == 0 {
+		return ""
+	}
+
+	now := time.Now()
+	lastOther := time.Time{}
+	lastSelf := time.Time{}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if lastSelf.IsZero() && msg.UserID == a.bot.GetSelfID() {
+			lastSelf = msg.Time
+		}
+		if lastOther.IsZero() && msg.UserID != a.bot.GetSelfID() {
+			lastOther = msg.Time
+		}
+		if !lastSelf.IsZero() && !lastOther.IsZero() {
+			break
+		}
+	}
+
+	lines := []string{
+		"- 这是一次定时主动思考，不是对方刚发来新消息",
+	}
+	if !lastOther.IsZero() {
+		lines = append(lines, fmt.Sprintf("- 距离对方上次发言：%s", humanizeElapsed(now.Sub(lastOther))))
+	}
+	if !lastSelf.IsZero() {
+		lines = append(lines, fmt.Sprintf("- 距离你上次发言：%s", humanizeElapsed(now.Sub(lastSelf))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func humanizeElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return "不到1分钟"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d分钟", int(d/time.Minute))
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	if m == 0 {
+		return fmt.Sprintf("%d小时", h)
+	}
+	return fmt.Sprintf("%d小时%d分钟", h, m)
+}
+
+func (a *Agent) buildGroupContext(ref memory.ConversationRef) string {
+	if a.bot == nil || !ref.IsGroup() {
 		return ""
 	}
 
 	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
 	defer cancel()
 
-	info, err := a.bot.GetGroupInfo(ctx, groupID, false)
+	info, err := a.bot.GetGroupInfo(ctx, ref.GroupID, false)
 	if err != nil {
-		zap.L().Debug("获取群基础信息失败", zap.Int64("group_id", groupID), zap.Error(err))
+		zap.L().Debug("获取群基础信息失败", zap.Int64("group_id", ref.GroupID), zap.Error(err))
 		return ""
 	}
 
@@ -926,8 +1190,79 @@ func (a *Agent) buildGroupContext(groupID int64) string {
 	return strings.Join(parts, "\n")
 }
 
-func (a *Agent) buildMemoryContext(ctx context.Context, groupID int64) ([]memory.Memory, []memory.Memory) {
-	msgs := a.getBuffer(groupID)
+func (a *Agent) buildPrivatePeerContext(ref memory.ConversationRef) string {
+	if !ref.IsPrivate() {
+		return ""
+	}
+
+	msgs := a.getBuffer(ref)
+	nickname := ""
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].UserID == ref.UserID && msgs[i].Nickname != "" {
+			nickname = msgs[i].Nickname
+			break
+		}
+	}
+
+	profile, err := a.memory.GetMemberProfile(ref.UserID)
+	if err != nil {
+		if nickname == "" {
+			nickname = fmt.Sprintf("%d", ref.UserID)
+		}
+		return fmt.Sprintf("- 对方: %s\n- 当前场景: 这是你和对方的一对一私聊", nickname)
+	}
+
+	displayName := profile.Nickname
+	if displayName == "" {
+		displayName = nickname
+	}
+	if displayName == "" {
+		displayName = fmt.Sprintf("%d", ref.UserID)
+	}
+
+	details := []string{
+		fmt.Sprintf("- 对方: %s", displayName),
+		fmt.Sprintf("- 亲密度: %.2f", profile.Intimacy),
+		fmt.Sprintf("- 信任度: %.2f", profile.Trust),
+		fmt.Sprintf("- 熟悉度: %.2f", profile.Familiarity),
+		fmt.Sprintf("- 认可度: %.2f", profile.Respect),
+		fmt.Sprintf("- 活跃度: %.2f", profile.Activity),
+		"- 当前场景: 这是你和对方的一对一私聊",
+	}
+	if profile.SpeakStyle != "" {
+		details = append(details, "- 说话风格: "+profile.SpeakStyle)
+	}
+	interests := strings.TrimSpace(profile.Interests)
+	if interests != "" {
+		var items []string
+		if err := sonic.UnmarshalString(interests, &items); err == nil && len(items) > 0 {
+			interests = strings.Join(items, "、")
+		}
+	}
+	if interests != "" {
+		details = append(details, "- 兴趣: "+interests)
+	}
+
+	return strings.Join(details, "\n")
+}
+
+func (a *Agent) resolveMoodTargetUserID(ref memory.ConversationRef) int64 {
+	if ref.IsPrivate() {
+		return ref.UserID
+	}
+
+	msgs := a.getBuffer(ref)
+	selfID := a.bot.GetSelfID()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].UserID != 0 && msgs[i].UserID != selfID {
+			return msgs[i].UserID
+		}
+	}
+	return 0
+}
+
+func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationRef) ([]memory.Memory, []memory.Memory) {
+	msgs := a.getBuffer(ref)
 	if len(msgs) == 0 {
 		return nil, nil
 	}
@@ -939,9 +1274,9 @@ func (a *Agent) buildMemoryContext(ctx context.Context, groupID int64) ([]memory
 
 	const threshold = 0.7
 
-	local, err := a.memory.SearchSimilarMemories(ctx, query, groupID, "", 4, threshold)
+	local, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, ref, "", 4, threshold)
 	if err != nil {
-		zap.L().Warn("本群主动记忆检索失败", zap.Int64("group_id", groupID), zap.Error(err))
+		zap.L().Warn("主动记忆检索失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return nil, nil
 	}
 
@@ -956,9 +1291,9 @@ func (a *Agent) buildMemoryContext(ctx context.Context, groupID int64) ([]memory
 		return local, nil
 	}
 
-	cross, err := a.memory.SearchSimilarMemories(ctx, query, 0, memory.MemoryTypeSelfExperience, 4, threshold)
+	cross, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, conversation.AllConversationRef(), memory.MemoryTypeSelfExperience, 4, threshold)
 	if err != nil {
-		zap.L().Warn("跨群自我经历检索失败", zap.Int64("group_id", groupID), zap.Error(err))
+		zap.L().Warn("跨会话自我经历检索失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return local, nil
 	}
 
@@ -985,7 +1320,8 @@ func (a *Agent) buildMemoryContext(ctx context.Context, groupID int64) ([]memory
 	return local, result
 }
 
-func collectTextContext(msgs []*onebot.GroupMessage) string {
+func collectTextContext(msgs []*onebot.Message) string {
+	msgs = sortedMessages(msgs)
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -1002,18 +1338,42 @@ func collectTextContext(msgs []*onebot.GroupMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-func (a *Agent) buildStyleHintContext(ctx context.Context, groupID int64) []string {
-	classification, err := a.classifyStyleContext(ctx, groupID)
+func sortedMessages(msgs []*onebot.Message) []*onebot.Message {
+	if len(msgs) <= 1 {
+		return msgs
+	}
+
+	cloned := append([]*onebot.Message(nil), msgs...)
+	sort.SliceStable(cloned, func(i, j int) bool {
+		if cloned[i] == nil || cloned[j] == nil {
+			return i < j
+		}
+		if cloned[i].MessageID > 0 && cloned[j].MessageID > 0 && cloned[i].MessageID != cloned[j].MessageID {
+			return cloned[i].MessageID < cloned[j].MessageID
+		}
+		if !cloned[i].Time.Equal(cloned[j].Time) {
+			return cloned[i].Time.Before(cloned[j].Time)
+		}
+		return i < j
+	})
+	return cloned
+}
+
+func (a *Agent) buildStyleHintContext(ctx context.Context, ref memory.ConversationRef) []string {
+	if !ref.IsGroup() {
+		return nil
+	}
+	classification, err := a.classifyStyleContext(ctx, ref)
 	if err != nil || classification == nil {
 		if err != nil {
-			zap.L().Debug("群风格分类失败", zap.Int64("group_id", groupID), zap.Error(err))
+			zap.L().Debug("群风格分类失败", zap.Int64("group_id", ref.GroupID), zap.Error(err))
 		}
 		return nil
 	}
 
-	cards, err := a.memory.ListActiveStyleCardsByIntent(classification.Intent, groupID, classification.Tone, 3)
+	cards, err := a.memory.ListActiveStyleCardsByIntent(classification.Intent, ref.GroupID, classification.Tone, 3)
 	if err != nil {
-		zap.L().Warn("查询风格卡片失败", zap.Int64("group_id", groupID), zap.Error(err))
+		zap.L().Warn("查询风格卡片失败", zap.Int64("group_id", ref.GroupID), zap.Error(err))
 		return nil
 	}
 	if len(cards) == 0 {
@@ -1026,14 +1386,17 @@ func (a *Agent) buildStyleHintContext(ctx context.Context, groupID int64) []stri
 		usedIDs = append(usedIDs, card.ID)
 	}
 	if err := a.memory.IncrementStyleCardUsage(usedIDs); err != nil {
-		zap.L().Debug("更新风格卡片使用计数失败", zap.Int64("group_id", groupID), zap.Error(err))
+		zap.L().Debug("更新风格卡片使用计数失败", zap.Int64("group_id", ref.GroupID), zap.Error(err))
 	}
 
 	return hints
 }
 
-func (a *Agent) classifyStyleContext(ctx context.Context, groupID int64) (*tools.StyleClassification, error) {
-	contextText := collectTextContext(a.getBuffer(groupID))
+func (a *Agent) classifyStyleContext(ctx context.Context, ref memory.ConversationRef) (*tools.StyleClassification, error) {
+	if !ref.IsGroup() {
+		return nil, fmt.Errorf("私聊不需要群风格分类")
+	}
+	contextText := collectTextContext(a.getBuffer(ref))
 	if contextText == "" {
 		return nil, fmt.Errorf("没有可分类的文字消息")
 	}
@@ -1115,8 +1478,8 @@ func formatStyleHint(card memory.StyleCard) string {
 }
 
 // buildChatContext 构建聊天上下文
-func (a *Agent) buildChatContext(groupID int64, lastProcessedTime time.Time) string {
-	msgs := a.getBuffer(groupID)
+func (a *Agent) buildChatContext(ref memory.ConversationRef, lastProcessedTime time.Time) string {
+	msgs := sortedMessages(a.getBuffer(ref))
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -1132,8 +1495,8 @@ func (a *Agent) buildChatContext(groupID int64, lastProcessedTime time.Time) str
 }
 
 // buildRecentPeopleContext 获取最近在场的人
-func (a *Agent) buildRecentPeopleContext(groupID int64) string {
-	msgs := a.getBuffer(groupID)
+func (a *Agent) buildRecentPeopleContext(ref memory.ConversationRef) string {
+	msgs := a.getBuffer(ref)
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -1188,6 +1551,9 @@ func (a *Agent) buildRecentPeopleContext(groupID int64) string {
 
 		details := []string{
 			fmt.Sprintf("亲密度 %.2f", profile.Intimacy),
+			fmt.Sprintf("信任度 %.2f", profile.Trust),
+			fmt.Sprintf("熟悉度 %.2f", profile.Familiarity),
+			fmt.Sprintf("认可度 %.2f", profile.Respect),
 			fmt.Sprintf("活跃度 %.2f", profile.Activity),
 		}
 		if profile.SpeakStyle != "" {
@@ -1211,7 +1577,7 @@ func (a *Agent) buildRecentPeopleContext(groupID int64) string {
 }
 
 // doSpeak 执行发言，返回消息ID
-func (a *Agent) doSpeak(ctx context.Context, groupID int64, content string, replyTo int64, mentions []int64) (int64, error) {
+func (a *Agent) doSpeak(ctx context.Context, ref memory.ConversationRef, content string, replyTo int64, mentions []int64) (int64, error) {
 	// 模拟打字延迟
 	cfg := config.Get()
 	if cfg.Chat.TypingSimulation {
@@ -1237,31 +1603,55 @@ func (a *Agent) doSpeak(ctx context.Context, groupID int64, content string, repl
 		}
 	}
 
-	msgID, err := a.bot.SendGroupMessage(ctx, groupID, content, replyTo, mentions)
+	var (
+		msgID int64
+		err   error
+	)
+	switch {
+	case ref.IsGroup():
+		msgID, err = a.bot.SendGroupMessage(ctx, ref.GroupID, content, replyTo, mentions)
+	case ref.IsPrivate():
+		msgID, err = a.bot.SendPrivateMessage(ctx, ref.UserID, content)
+	default:
+		return 0, fmt.Errorf("无效的会话类型")
+	}
 	if err != nil {
-		zap.L().Error("发言失败", zap.Int64("group_id", groupID), zap.Error(err))
+		zap.L().Error("发言失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return 0, err
 	}
 
-	msg := &onebot.GroupMessage{
-		MessageID:   msgID,
-		GroupID:     groupID,
-		UserID:      a.bot.GetSelfID(),
-		Nickname:    a.persona.GetName(),
-		Content:     content,
-		Time:        time.Now(),
-		MessageType: "group",
+	msg := &onebot.Message{
+		MessageID:      msgID,
+		ConversationID: ref.ID(),
+		GroupID:        ref.GroupID,
+		UserID:         a.bot.GetSelfID(),
+		Nickname:       a.persona.GetName(),
+		Content:        content,
+		FinalContent:   content,
+		Time:           time.Now(),
+		MessageSource:  ref.Source,
 	}
 	a.onMessage(msg)
-	zap.L().Info("发言成功", zap.Int64("group_id", groupID), zap.String("content", content))
+	zap.L().Info("发言成功", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.String("content", content))
 	return msgID, nil
 }
 
 // doSendSticker 执行发送表情包，并记录消息
-func (a *Agent) doSendSticker(ctx context.Context, groupID int64, filePath string, description string) (int64, error) {
-	msgID, err := a.bot.SendImageMessage(ctx, groupID, filePath, true)
+func (a *Agent) doSendSticker(ctx context.Context, ref memory.ConversationRef, filePath string, description string) (int64, error) {
+	var (
+		msgID int64
+		err   error
+	)
+	switch {
+	case ref.IsGroup():
+		msgID, err = a.bot.SendGroupImageMessage(ctx, ref.GroupID, filePath, true)
+	case ref.IsPrivate():
+		msgID, err = a.bot.SendPrivateImageMessage(ctx, ref.UserID, filePath, true)
+	default:
+		return 0, fmt.Errorf("无效的会话类型")
+	}
 	if err != nil {
-		zap.L().Error("发送表情包失败", zap.Int64("group_id", groupID), zap.String("path", filePath), zap.Error(err))
+		zap.L().Error("发送表情包失败", zap.String("ID", ref.ID()), zap.String("path", filePath), zap.Error(err))
 		return 0, err
 	}
 
@@ -1272,20 +1662,22 @@ func (a *Agent) doSendSticker(ctx context.Context, groupID int64, filePath strin
 		content = "[表情包]"
 	}
 
-	msg := &onebot.GroupMessage{
-		MessageID:   msgID,
-		GroupID:     groupID,
-		UserID:      a.bot.GetSelfID(),
-		Nickname:    a.persona.GetName(),
-		Content:     "",
-		Time:        time.Now(),
-		MessageType: "group",
+	msg := &onebot.Message{
+		MessageID:      msgID,
+		ConversationID: ref.ID(),
+		GroupID:        ref.GroupID,
+		UserID:         a.bot.GetSelfID(),
+		Nickname:       a.persona.GetName(),
+		Content:        "",
+		FinalContent:   content,
+		Time:           time.Now(),
+		MessageSource:  ref.Source,
 		Images: []onebot.ImageInfo{
 			{Summary: content, SubType: 1},
 		},
 	}
 	a.onMessage(msg)
-	zap.L().Info("发送表情包成功", zap.Int64("group_id", groupID), zap.String("desc", description))
+	zap.L().Info("发送表情包成功", zap.String("ID", ref.ID()), zap.String("desc", description))
 	return msgID, nil
 }
 

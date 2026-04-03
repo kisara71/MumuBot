@@ -37,10 +37,10 @@ func mergeAndDeduplicateStrings(existing []string, newItems []string) []string {
 	return result
 }
 
-// UpdateMemberProfileInput 更新成员画像的输入参数
-type UpdateMemberProfileInput struct {
+// UpdateUserProfileInput 更新成员画像的输入参数
+type UpdateUserProfileInput struct {
 	// UserID 群友的QQ号
-	UserID int64 `json:"user_id" jsonschema:"description=群友的QQ号"`
+	UserID int64 `json:"user_id" jsonschema:"description=群友/私聊对象的QQ号"`
 	// SpeakStyle 说话风格描述
 	SpeakStyle string `json:"speak_style,omitempty" jsonschema:"description=说话风格描述（覆盖之前的描述）"`
 	// Interests 兴趣爱好列表
@@ -49,6 +49,12 @@ type UpdateMemberProfileInput struct {
 	CommonWords []string `json:"common_words,omitempty" jsonschema:"description=常用词汇或口头禅（只传入新增的项）"`
 	// IntimacyDelta 亲密度变化值 -0.3 到 0.3
 	IntimacyDelta float64 `json:"intimacy_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=亲密度变化值(-0.3到0.3)，正数表示增加亲密度，负数表示降低亲密度"`
+	// TrustDelta 信任度变化值
+	TrustDelta float64 `json:"trust_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=信任度变化值(-0.3到0.3)"`
+	// FamiliarityDelta 熟悉度变化值
+	FamiliarityDelta float64 `json:"familiarity_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=熟悉度变化值(-0.3到0.3)"`
+	// RespectDelta 认可度变化值
+	RespectDelta float64 `json:"respect_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=认可度变化值(-0.3到0.3)"`
 }
 
 // UpdateMemberProfileOutput 更新成员画像的输出
@@ -58,7 +64,7 @@ type UpdateMemberProfileOutput struct {
 }
 
 // updateMemberProfileFunc 更新成员画像的实际实现
-func updateMemberProfileFunc(ctx context.Context, input *UpdateMemberProfileInput) (*UpdateMemberProfileOutput, error) {
+func updateMemberProfileFunc(ctx context.Context, input *UpdateUserProfileInput) (*UpdateMemberProfileOutput, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
 		return &UpdateMemberProfileOutput{Success: false, Message: "工具上下文未初始化"}, nil
@@ -105,33 +111,36 @@ func updateMemberProfileFunc(ctx context.Context, input *UpdateMemberProfileInpu
 
 	delta := input.IntimacyDelta
 	profile.Intimacy = mutils.ClampFloat64(profile.Intimacy+delta, 0, 1)
+	profile.Trust = mutils.ClampFloat64(profile.Trust+input.TrustDelta, 0, 1)
+	profile.Familiarity = mutils.ClampFloat64(profile.Familiarity+input.FamiliarityDelta, 0, 1)
+	profile.Respect = mutils.ClampFloat64(profile.Respect+input.RespectDelta, 0, 1)
 
-	if err := tc.MemoryMgr.UpdateMemberProfile(profile); err != nil {
+	if err := tc.MemoryMgr.UpdateUserProfile(profile); err != nil {
 		return &UpdateMemberProfileOutput{Success: false, Message: err.Error()}, nil
 	}
 
-	return &UpdateMemberProfileOutput{Success: true, Message: "已更新对该群友的了解"}, nil
+	return &UpdateMemberProfileOutput{Success: true, Message: "已更新对该用户的了解"}, nil
 }
 
 // NewUpdateMemberProfileTool 创建更新成员画像工具
 func NewUpdateMemberProfileTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"updateMemberProfile",
-		"更新你对某个群友的了解。当你发现群友的新特点、说话风格、兴趣爱好时使用。也可以根据互动情况调整亲密度。",
+		"更新你对某个群友/私聊对象的了解。当你发现群友/私聊对象的新特点、说话风格、兴趣爱好时使用。也可以根据互动情况调整亲密度。",
 		updateMemberProfileFunc,
 	)
 }
 
 // ==================== 获取成员信息工具 ====================
 
-// GetMemberInfoInput 获取成员信息的输入参数
-type GetMemberInfoInput struct {
+// GetUserInfoInput 获取成员信息的输入参数
+type GetUserInfoInput struct {
 	// UserID 群友的QQ号
-	UserID int64 `json:"user_id" jsonschema:"description=群友的QQ号"`
+	UserID int64 `json:"user_id" jsonschema:"description=群友/私聊对象的QQ号"`
 }
 
-// GetMemberInfoOutput 获取成员信息的输出
-type GetMemberInfoOutput struct {
+// GetUserInfoOutput 获取成员信息的输出
+type GetUserInfoOutput struct {
 	Success     bool     `json:"success"`
 	Message     string   `json:"message,omitempty"`
 	Nickname    string   `json:"nickname,omitempty"`
@@ -140,23 +149,26 @@ type GetMemberInfoOutput struct {
 	CommonWords []string `json:"common_words,omitempty"`
 	Activity    float64  `json:"activity,omitempty"` // 活跃度 0-1
 	Intimacy    float64  `json:"intimacy,omitempty"` // 亲密度 0-1
+	Trust       float64  `json:"trust,omitempty"`
+	Familiarity float64  `json:"familiarity,omitempty"`
+	Respect     float64  `json:"respect,omitempty"`
 	MsgCount    int      `json:"msg_count,omitempty"`
 }
 
 // getMemberInfoFunc 获取成员信息的实际实现
-func getMemberInfoFunc(ctx context.Context, input *GetMemberInfoInput) (*GetMemberInfoOutput, error) {
+func getMemberInfoFunc(ctx context.Context, input *GetUserInfoInput) (*GetUserInfoOutput, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return &GetMemberInfoOutput{Success: false, Message: "工具上下文未初始化"}, nil
+		return &GetUserInfoOutput{Success: false, Message: "工具上下文未初始化"}, nil
 	}
 
 	if input.UserID == 0 {
-		return &GetMemberInfoOutput{Success: false, Message: "用户 ID 不能为空"}, nil
+		return &GetUserInfoOutput{Success: false, Message: "用户 ID 不能为空"}, nil
 	}
 
 	profile, err := tc.MemoryMgr.GetMemberProfile(input.UserID)
 	if err != nil {
-		return &GetMemberInfoOutput{
+		return &GetUserInfoOutput{
 			Success: false,
 			Message: "不太了解这个人",
 		}, nil
@@ -174,7 +186,7 @@ func getMemberInfoFunc(ctx context.Context, input *GetMemberInfoInput) (*GetMemb
 		}
 	}
 
-	return &GetMemberInfoOutput{
+	return &GetUserInfoOutput{
 		Success:     true,
 		Nickname:    profile.Nickname,
 		SpeakStyle:  profile.SpeakStyle,
@@ -182,6 +194,9 @@ func getMemberInfoFunc(ctx context.Context, input *GetMemberInfoInput) (*GetMemb
 		CommonWords: commonWords,
 		Activity:    profile.Activity,
 		Intimacy:    profile.Intimacy,
+		Trust:       profile.Trust,
+		Familiarity: profile.Familiarity,
+		Respect:     profile.Respect,
 		MsgCount:    profile.MsgCount,
 	}, nil
 }
@@ -190,7 +205,7 @@ func getMemberInfoFunc(ctx context.Context, input *GetMemberInfoInput) (*GetMemb
 func NewGetMemberInfoTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"getMemberInfo",
-		"查看你对某个群友的了解。",
+		"查看你对某个群友/私聊对象的了解。",
 		getMemberInfoFunc,
 	)
 }

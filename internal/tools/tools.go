@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/jargon"
 	"mumu-bot/internal/memory"
 	"mumu-bot/internal/onebot"
@@ -20,14 +21,14 @@ import (
 )
 
 // SpeakCallback 发言回调函数类型，返回消息ID
-type SpeakCallback func(ctx context.Context, groupID int64, content string, replyTo int64, mentions []int64) (int64, error)
+type SpeakCallback func(ctx context.Context, ref conversation.Ref, content string, replyTo int64, mentions []int64) (int64, error)
 
 // SendStickerCallback 发送表情包回调函数类型
-type SendStickerCallback func(ctx context.Context, groupID int64, filePath string, description string) (int64, error)
+type SendStickerCallback func(ctx context.Context, ref conversation.Ref, filePath string, description string) (int64, error)
 
 // ToolContext 工具执行上下文
 type ToolContext struct {
-	GroupID             int64
+	ConversationRef     conversation.Ref
 	MemoryMgr           *memory.Manager
 	Bot                 *onebot.Client
 	SpeakCallback       SpeakCallback       // 发言回调
@@ -76,9 +77,9 @@ func (tc *ToolContext) MarkToolCallSeen(toolName string, arguments string) bool 
 
 // LearningContext 学习任务上下文
 type LearningContext struct {
-	GroupID   int64
-	MemMgr    *memory.Manager
-	JargonMgr *jargon.Manager
+	ConversationRef conversation.Ref
+	MemMgr          *memory.Manager
+	JargonMgr       *jargon.Manager
 }
 
 const learningContextKey ctxKey = "learning_context"
@@ -94,6 +95,18 @@ func GetLearningContext(ctx context.Context) *LearningContext {
 		return lc
 	}
 	return nil
+}
+
+// GetConversationID 从工具或学习上下文中提取当前会话 ID。
+func GetConversationID(ctx context.Context) string {
+	if tc := GetToolContext(ctx); tc != nil {
+		return tc.ConversationRef.ID()
+	}
+	if lc := GetLearningContext(ctx); lc != nil {
+		return lc.ConversationRef.ID()
+	}
+	zap.L().Warn("取到空的上下文")
+	return ""
 }
 
 func truncateToolLogString(raw string, max int) string {
@@ -162,7 +175,7 @@ func getGroupMemberDetailFunc(ctx context.Context, input *GetGroupMemberDetailIn
 		return &GetGroupMemberDetailOutput{Success: false, Message: "用户 ID 不能为空"}, nil
 	}
 
-	info, err := tc.Bot.GetGroupMemberInfo(ctx, tc.GroupID, input.UserID, false)
+	info, err := tc.Bot.GetGroupMemberInfo(ctx, tc.ConversationRef.GroupID, input.UserID, false)
 	if err != nil {
 		return &GetGroupMemberDetailOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -220,7 +233,7 @@ func getRecentMessagesFunc(ctx context.Context, input *GetRecentMessagesInput) (
 		limit = 40
 	}
 
-	messages := tc.MemoryMgr.GetRecentMessages(tc.GroupID, limit, input.Offset)
+	messages := tc.MemoryMgr.GetRecentMessages(tc.ConversationRef, limit, input.Offset)
 	results := make([]map[string]interface{}, 0, len(messages))
 	for _, m := range messages {
 		results = append(results, map[string]interface{}{
@@ -274,7 +287,7 @@ func getGroupNoticesFunc(ctx context.Context, input *GetGroupNoticesInput) (*Get
 		return &GetGroupNoticesOutput{Success: false, Message: "Bot 未连接"}, nil
 	}
 
-	notices, err := tc.Bot.GetGroupNotice(ctx, tc.GroupID)
+	notices, err := tc.Bot.GetGroupNotice(ctx, tc.ConversationRef.GroupID)
 	if err != nil {
 		return &GetGroupNoticesOutput{Success: false, Message: "获取群公告失败: " + err.Error()}, nil
 	}
@@ -337,7 +350,7 @@ func getEssenceMessagesFunc(ctx context.Context, input *GetEssenceMessagesInput)
 		return &GetEssenceMessagesOutput{Success: false, Message: "Bot 未连接"}, nil
 	}
 
-	messages, err := tc.Bot.GetEssenceMessages(ctx, tc.GroupID)
+	messages, err := tc.Bot.GetEssenceMessages(ctx, tc.ConversationRef.GroupID)
 	if err != nil {
 		return &GetEssenceMessagesOutput{Success: false, Message: "获取群精华消息失败: " + err.Error()}, nil
 	}

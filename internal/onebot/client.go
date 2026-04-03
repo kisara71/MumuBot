@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +30,7 @@ type Client struct {
 	mutedUntil map[int64]time.Time
 
 	// 消息回调
-	onMessage func(*GroupMessage)
+	onMessage func(*Message)
 
 	// 重连控制
 	reconnecting bool
@@ -73,23 +74,24 @@ func (r *APIResponse) DataList() []interface{} {
 	return nil
 }
 
-// GroupMessage 群消息
-type GroupMessage struct {
-	MessageID    int64            `json:"message_id"`
-	GroupID      int64            `json:"group_id"`
-	UserID       int64            `json:"user_id"`
-	Nickname     string           `json:"nickname"`
-	Content      string           `json:"content"`                 // 纯文本内容
-	IsMentioned  bool             `json:"is_mentioned"`            // 是否@机器人
-	Time         time.Time        `json:"time"`                    // 消息时间
-	MessageType  string           `json:"message_type"`            // 消息类型
-	Images       []ImageInfo      `json:"images,omitempty"`        // 图片列表
-	Videos       []VideoInfo      `json:"videos,omitempty"`        // 视频列表
-	Faces        []FaceInfo       `json:"faces,omitempty"`         // 表情列表
-	AtList       []int64          `json:"at_list,omitempty"`       // @的用户列表
-	Reply        *ReplyInfo       `json:"reply,omitempty"`         // 回复信息
-	Forwards     []ForwardMessage `json:"forwards,omitempty"`      // 合并转发内容
-	FinalContent string           `json:"final_content,omitempty"` // 处理后的最终内容
+// Message 群消息
+type Message struct {
+	MessageID      int64                      `json:"message_id"`
+	ConversationID string                     `json:"conversation_id,omitempty"`
+	GroupID        int64                      `json:"group_id"`
+	UserID         int64                      `json:"user_id"`
+	Nickname       string                     `json:"nickname"`
+	Content        string                     `json:"content"`                 // 纯文本内容
+	IsMentioned    bool                       `json:"is_mentioned"`            // 是否@机器人
+	Time           time.Time                  `json:"time"`                    // 消息时间
+	MessageSource  conversation.MessageSource `json:"message_source"`          // 消息类型
+	Images         []ImageInfo                `json:"images,omitempty"`        // 图片列表
+	Videos         []VideoInfo                `json:"videos,omitempty"`        // 视频列表
+	Faces          []FaceInfo                 `json:"faces,omitempty"`         // 表情列表
+	AtList         []int64                    `json:"at_list,omitempty"`       // @的用户列表
+	Reply          *ReplyInfo                 `json:"reply,omitempty"`         // 回复信息
+	Forwards       []ForwardMessage           `json:"forwards,omitempty"`      // 合并转发内容
+	FinalContent   string                     `json:"final_content,omitempty"` // 处理后的最终内容
 }
 
 // ImageInfo 图片信息
@@ -321,15 +323,23 @@ func (c *Client) handleMetaEvent(event map[string]interface{}) {
 
 // handleMessageEvent 处理消息事件
 func (c *Client) handleMessageEvent(event map[string]interface{}) {
-	msgType, _ := event["message_type"].(string)
-
-	// 只处理群消息
-	if msgType != "group" {
+	msgSrc, ok := event["message_type"].(string)
+	if !ok {
+		zap.L().Error("预期之外的信息类型:", zap.Any("msg_type", event["message_type"]))
 		return
 	}
 
+	var msg *Message
+	switch conversation.MessageSource(msgSrc) {
+	case MessageSourceGroup:
+		msg = c.parseGroupMessage(event)
+	case MessageSourcePrivate:
+		msg = c.parseUserMessage(event)
+	default:
+		zap.L().Error("预期之外的信息来源:", zap.Any("msg_src", msgSrc))
+		return
+	}
 	// 解析消息
-	msg := c.parseGroupMessage(event)
 	if msg == nil {
 		return
 	}
@@ -346,9 +356,13 @@ func (c *Client) handleNoticeEvent(event map[string]interface{}) {
 	subType, _ := event["sub_type"].(string)
 	zap.L().Debug("收到通知", zap.String("type", noticeType), zap.String("sub_type", subType))
 
-	if noticeType == "group_ban" {
+	switch NoticeEventType(noticeType) {
+	case NoticeEventTypeGroupBan:
 		c.handleGroupBanNotice(event, subType)
+	case NoticeEventTypeFriendAdd:
+		// TODO: implement me
 	}
+
 }
 
 func (c *Client) handleGroupBanNotice(event map[string]interface{}, subType string) {
@@ -416,31 +430,17 @@ func (c *Client) handleRequestEvent(event map[string]interface{}) {
 }
 
 // parseGroupMessage 解析群消息
-func (c *Client) parseGroupMessage(event map[string]interface{}) *GroupMessage {
-	msg := &GroupMessage{
-		MessageType: "group",
+func (c *Client) parseGroupMessage(event map[string]interface{}) *Message {
+	msg := &Message{
+		MessageSource:  MessageSourceGroup,
+		ConversationID: "",
 	}
-
-	// 消息时间
-	if t, ok := parseInt64(event["time"]); ok {
-		msg.Time = time.Unix(t, 0)
-	} else {
-		msg.Time = time.Now()
-	}
-
-	// 消息 ID
-	if msgID, ok := parseInt64(event["message_id"]); ok {
-		msg.MessageID = msgID
-		readCtx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
-		if err := c.MarkMsgAsRead(readCtx, msgID); err != nil {
-			zap.L().Error("标记消息已读失败", zap.Error(err))
-		}
-		cancel()
-	}
-
+	//	common message
+	c.parseCommonMessage(event, msg)
 	// 群ID
 	if groupID, ok := parseInt64(event["group_id"]); ok {
 		msg.GroupID = groupID
+		msg.ConversationID = conversation.GroupConversationRef(groupID).ID()
 	}
 
 	// 发送者信息
@@ -466,9 +466,52 @@ func (c *Client) parseGroupMessage(event map[string]interface{}) *GroupMessage {
 
 	return msg
 }
+func (c *Client) parseUserMessage(event map[string]interface{}) *Message {
+	msg := &Message{
+		MessageSource: MessageSourcePrivate,
+	}
+	//	commmon message
+	c.parseCommonMessage(event, msg)
+
+	// 私聊会话对象
+	if userID, ok := parseInt64(event["user_id"]); ok && userID > 0 {
+		msg.ConversationID = conversation.PrivateConversationRef(userID).ID()
+	}
+
+	// 发送者信息
+	if sender, ok := event["sender"].(map[string]interface{}); ok {
+		if userID, ok := parseInt64(sender["user_id"]); ok {
+			msg.UserID = userID
+		}
+		if nickname, ok := sender["nickname"].(string); ok {
+			msg.Nickname = nickname
+		}
+	}
+	c.parseMessageSegments(event, msg)
+
+	return msg
+}
+func (c *Client) parseCommonMessage(event map[string]interface{}, msg *Message) {
+	// 消息时间
+	if t, ok := parseInt64(event["time"]); ok {
+		msg.Time = time.Unix(t, 0)
+	} else {
+		msg.Time = time.Now()
+	}
+
+	// 消息 ID
+	if msgID, ok := parseInt64(event["message_id"]); ok {
+		msg.MessageID = msgID
+		readCtx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+		if err := c.MarkMsgAsRead(readCtx, msgID); err != nil {
+			zap.L().Error("标记消息已读失败", zap.Error(err))
+		}
+		cancel()
+	}
+}
 
 // parseMessageSegments 解析消息段，填充消息各字段
-func (c *Client) parseMessageSegments(event map[string]interface{}, msg *GroupMessage) {
+func (c *Client) parseMessageSegments(event map[string]interface{}, msg *Message) {
 	message, ok := event["message"].([]interface{})
 	if !ok {
 		if raw, ok := event["raw_message"].(string); ok {
@@ -658,7 +701,7 @@ func (c *Client) parseMessageSegments(event map[string]interface{}, msg *GroupMe
 }
 
 // OnMessage 设置消息回调
-func (c *Client) OnMessage(handler func(*GroupMessage)) {
+func (c *Client) OnMessage(handler func(*Message)) {
 	c.onMessage = handler
 }
 
@@ -1322,10 +1365,17 @@ func (c *Client) GetMessageReactions(ctx context.Context, messageID int64) ([]Em
 	return reactions, nil
 }
 
-// SendImageMessage 发送图片/表情包消息
-// filePath: 本地文件绝对路径
-// isSticker: true 时作为表情包发送 (sub_type=1)
-func (c *Client) SendImageMessage(ctx context.Context, groupID int64, filePath string, isSticker bool) (int64, error) {
+// SendGroupImageMessage 发送群图片/表情包消息。
+func (c *Client) SendGroupImageMessage(ctx context.Context, groupID int64, filePath string, isSticker bool) (int64, error) {
+	return c.sendImageMessage(ctx, "send_group_msg", "group_id", groupID, filePath, isSticker)
+}
+
+// SendPrivateImageMessage 发送私聊图片/表情包消息。
+func (c *Client) SendPrivateImageMessage(ctx context.Context, userID int64, filePath string, isSticker bool) (int64, error) {
+	return c.sendImageMessage(ctx, "send_private_msg", "user_id", userID, filePath, isSticker)
+}
+
+func (c *Client) sendImageMessage(ctx context.Context, action string, target string, targetID int64, filePath string, isSticker bool) (int64, error) {
 	subType := 0
 	if isSticker {
 		subType = 1
@@ -1341,9 +1391,9 @@ func (c *Client) SendImageMessage(ctx context.Context, groupID int64, filePath s
 		},
 	}
 
-	resp, err := c.callAPI(ctx, "send_group_msg", map[string]interface{}{
-		"group_id": groupID,
-		"message":  message,
+	resp, err := c.callAPI(ctx, action, map[string]interface{}{
+		target:    targetID,
+		"message": message,
 	})
 	if err != nil {
 		return 0, err

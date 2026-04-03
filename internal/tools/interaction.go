@@ -43,7 +43,7 @@ func speakFunc(ctx context.Context, input *SpeakInput) (*SpeakOutput, error) {
 	}
 
 	// 通过回调发送消息，获取返回的消息ID
-	msgID, err := tc.SpeakCallback(ctx, tc.GroupID, input.Content, input.ReplyTo, input.Mentions)
+	msgID, err := tc.SpeakCallback(ctx, tc.ConversationRef, input.Content, input.ReplyTo, input.Mentions)
 	if err != nil {
 		return &SpeakOutput{
 			Success: false,
@@ -133,7 +133,7 @@ func pokeFunc(ctx context.Context, input *PokeInput) (*PokeOutput, error) {
 		return &PokeOutput{Success: false, Message: "用户 ID 不能为空"}, nil
 	}
 
-	if err := tc.Bot.GroupPoke(ctx, tc.GroupID, input.UserID); err != nil {
+	if err := tc.Bot.GroupPoke(ctx, tc.ConversationRef.GroupID, input.UserID); err != nil {
 		return &PokeOutput{Success: false, Message: err.Error()}, nil
 	}
 

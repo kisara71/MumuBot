@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"mumu-bot/internal/config"
+	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/utils"
 	"mumu-bot/internal/vector"
 	"strings"
@@ -21,10 +22,10 @@ type EmbeddingProvider interface {
 }
 
 type vectorStore interface {
-	Insert(ctx context.Context, memoryID uint, groupID int64, memType string, embedding []float64) (int64, error)
-	Search(ctx context.Context, embedding []float64, groupID int64, memType string, topK int, threshold float64) ([]vector.SearchResult, error)
+	Insert(ctx context.Context, memoryID uint, refID string, memType string, embedding []float64) (int64, error)
+	Search(ctx context.Context, embedding []float64, refID string, memType string, topK int, threshold float64) ([]vector.SearchResult, error)
 	Delete(ctx context.Context, memoryIDs []uint) error
-	DeleteByGroup(ctx context.Context, groupID int64) error
+	DeleteByRef(ctx context.Context, refID string) error
 	Close() error
 	GetConfig() *vector.MilvusConfig
 }
@@ -36,6 +37,30 @@ type Manager struct {
 	milvus          vectorStore // Memory 向量存储
 	styleCardMilvus vectorStore // StyleCard 向量存储
 	cleanupStop     chan struct{}
+}
+
+func buildLikeQuery(columns []string, keywords []string) (string, []interface{}) {
+	if len(columns) == 0 || len(keywords) == 0 {
+		return "", nil
+	}
+	likeConditions := make([]string, 0, len(keywords))
+	args := make([]interface{}, 0, len(columns)*len(keywords))
+	for _, kw := range keywords {
+		columnConds := make([]string, 0, len(columns))
+		pattern := "%" + kw + "%"
+		for _, column := range columns {
+			columnConds = append(columnConds, column+" LIKE ?")
+			args = append(args, pattern)
+		}
+		likeConditions = append(likeConditions, "("+strings.Join(columnConds, " OR ")+")")
+	}
+	return strings.Join(likeConditions, " OR "), args
+}
+
+func reverseMessageLogs(items []MessageLog) {
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
+	}
 }
 
 // NewManager 创建记忆管理器
@@ -73,7 +98,7 @@ func NewManager(embedding EmbeddingProvider) (*Manager, error) {
 	// 迁移所有表
 	if err := db.AutoMigrate(
 		&Memory{},
-		&MemberProfile{},
+		&UserProfile{},
 		&StyleCard{},
 		&Jargon{},
 		&MessageLog{},
@@ -138,42 +163,45 @@ func (m *Manager) AddMessage(msg MessageLog) error {
 }
 
 // GetRecentMessages 获取最近的消息记录
-func (m *Manager) GetRecentMessages(groupID int64, limit, offset int) []MessageLog {
+func (m *Manager) GetRecentMessages(ref ConversationRef, limit, offset int) []MessageLog {
 	var dbMsgs []MessageLog
-	q := m.db.Where("group_id = ?", groupID).Order("created_at DESC").Limit(limit)
+	q := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).Order("created_at DESC").Limit(limit)
 	if offset > 0 {
 		q = q.Offset(offset)
 	}
 	q.Find(&dbMsgs)
 
-	// 反转，按时间正序排列
-	for i, j := 0, len(dbMsgs)-1; i < j; i, j = i+1, j-1 {
-		dbMsgs[i], dbMsgs[j] = dbMsgs[j], dbMsgs[i]
-	}
+	reverseMessageLogs(dbMsgs)
 	return dbMsgs
 }
 
 // GetMessagesAfterID 获取指定消息ID之后的消息
-func (m *Manager) GetMessagesAfterID(groupID int64, selfID int64, lastID uint, limit int) ([]MessageLog, error) {
+func (m *Manager) GetMessagesAfterID(ref ConversationRef, selfID int64, lastID uint, limit int) ([]MessageLog, error) {
 	var dbMsgs []MessageLog
-	err := m.db.Where("group_id = ? AND id > ? AND user_id != ?", groupID, lastID, selfID).
-		Order("id ASC").Limit(limit).Find(&dbMsgs).Error
+	q := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).
+		Where("id > ? AND user_id != ?", lastID, selfID).
+		Order("id ASC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	err := q.Find(&dbMsgs).Error
 	return dbMsgs, err
 }
 
-// GetMessageCountByTime 获取指定用户在指定群组一段时间内的消息数量
-func (m *Manager) GetMessageCountByTime(groupID, userID int64, startTime time.Time) (int64, error) {
+// GetMessageCountByTime 获取指定用户在指定作用域一段时间内的消息数量
+func (m *Manager) GetMessageCountByTime(ref ConversationRef, userID int64, startTime time.Time) (int64, error) {
 	var count int64
-	err := m.db.Model(&MessageLog{}).
-		Where("group_id = ? AND user_id = ? AND created_at >= ?", groupID, userID, startTime).
+	err := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).
+		Where("user_id = ? AND created_at >= ?", userID, startTime).
 		Count(&count).Error
 	return count, err
 }
 
 // ==================== 长期记忆 ====================
+// TODO 私聊长期记忆
 
-// SearchSimilarMemories 按群和记忆类型搜索相似记忆
-func (m *Manager) SearchSimilarMemories(ctx context.Context, text string, groupID int64, memType MemoryType, limit int, threshold float64) ([]Memory, error) {
+// SearchSimilarMemoriesByConversation 按会话引用和记忆类型搜索相似记忆
+func (m *Manager) SearchSimilarMemoriesByConversation(ctx context.Context, text string, ref ConversationRef, memType MemoryType, limit int, threshold float64) ([]Memory, error) {
 	if m.milvus == nil || m.embedding == nil {
 		return nil, errors.New("向量检索未启用")
 	}
@@ -186,7 +214,7 @@ func (m *Manager) SearchSimilarMemories(ctx context.Context, text string, groupI
 		return nil, err
 	}
 
-	results, err := m.milvusVectorSearch(ctx, emb, groupID, string(memType), limit, threshold)
+	results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), normalizeMemoryTypeFilter(memType), limit, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +237,7 @@ func (m *Manager) UpdateMemoryContent(ctx context.Context, id uint, newContent s
 		if err == nil {
 			var mem Memory
 			if err := m.db.First(&mem, id).Error; err == nil {
-				_, _ = m.milvus.Insert(ctx, id, mem.GroupID, string(mem.Type), emb)
+				_, _ = m.milvus.Insert(ctx, id, mem.ConversationID, string(mem.Type), emb)
 			}
 		}
 	}
@@ -244,7 +272,7 @@ func (m *Manager) SaveMemory(ctx context.Context, mem *Memory) error {
 
 	// 保存向量到 Milvus
 	if m.milvus != nil && len(embedding) > 0 {
-		if _, err := m.milvus.Insert(ctx, mem.ID, mem.GroupID, string(mem.Type), embedding); err != nil {
+		if _, err := m.milvus.Insert(ctx, mem.ID, mem.ConversationID, string(mem.Type), embedding); err != nil {
 			// 向量插入失败只记录日志，不影响主流程
 			zap.L().Error("Milvus 插入向量失败", zap.Error(err))
 		}
@@ -253,12 +281,12 @@ func (m *Manager) SaveMemory(ctx context.Context, mem *Memory) error {
 	return nil
 }
 
-// QueryMemory 查询相关记忆
-func (m *Manager) QueryMemory(ctx context.Context, query string, groupID int64, memType MemoryType, limit int) ([]Memory, error) {
+// QueryMemoryByConversation 查询相关记忆
+func (m *Manager) QueryMemoryByConversation(ctx context.Context, query string, ref ConversationRef, memType MemoryType, limit int) ([]Memory, error) {
 	// 尝试 Milvus 向量搜索
 	if m.milvus != nil && m.embedding != nil {
 		if emb, err := m.embedding.Embed(ctx, query); err == nil {
-			if results, err := m.milvusVectorSearch(ctx, emb, groupID, string(memType), limit, 0.7); err == nil && len(results) > 0 {
+			if results, err := m.milvusVectorSearch(ctx, emb, ref.ID(), normalizeMemoryTypeFilter(memType), limit, 0.7); err == nil && len(results) > 0 {
 				return results, nil
 			}
 		}
@@ -266,10 +294,7 @@ func (m *Manager) QueryMemory(ctx context.Context, query string, groupID int64, 
 
 	// 回退到关键词搜索
 	var memories []Memory
-	q := m.db.Model(&Memory{})
-	if groupID != 0 {
-		q = q.Where("group_id = ?", groupID)
-	}
+	q := scopeConversation(ref, m.db.Model(&Memory{}), conversationFields)
 	if memType != "" {
 		q = q.Where("type = ?", memType)
 	}
@@ -277,13 +302,8 @@ func (m *Manager) QueryMemory(ctx context.Context, query string, groupID int64, 
 	if len(keywords) == 0 {
 		return memories, nil
 	}
-	likeConditions := make([]string, 0, len(keywords))
-	args := make([]interface{}, 0, len(keywords))
-	for _, kw := range keywords {
-		likeConditions = append(likeConditions, "content LIKE ?")
-		args = append(args, "%"+kw+"%")
-	}
-	err := q.Where(strings.Join(likeConditions, " OR "), args...).
+	condition, args := buildLikeQuery([]string{"content"}, keywords)
+	err := q.Where(condition, args...).
 		Order("importance DESC, updated_at DESC").
 		Limit(limit).
 		Find(&memories).Error
@@ -341,46 +361,58 @@ func (m *Manager) startMessageLogCleanup() {
 	}()
 }
 
-// cleanupMessageLogs 清理消息日志，仅保留每个群最新的 keepLatest 条
+// cleanupMessageLogs 清理消息日志，仅保留每个会话最新的 keepLatest 条
 func (m *Manager) cleanupMessageLogs(keepLatest int) {
 	if keepLatest <= 0 {
 		return
 	}
 
-	var groupIDs []int64
-	if err := m.db.Model(&MessageLog{}).Distinct("group_id").Pluck("group_id", &groupIDs).Error; err != nil {
-		zap.L().Warn("清理消息日志失败：获取群列表失败", zap.Error(err))
+	type logScope struct {
+		ConversationID string
+	}
+
+	var scopes []logScope
+	if err := m.db.Model(&MessageLog{}).
+		Where("conversation_id <> ''").
+		Select("conversation_id").
+		Group("conversation_id").
+		Scan(&scopes).Error; err != nil {
+		zap.L().Warn("清理消息日志失败：获取会话列表失败", zap.Error(err))
 		return
 	}
 
-	for _, groupID := range groupIDs {
+	for _, scope := range scopes {
+		ref, ok := conversation.ParseRefID(scope.ConversationID)
+		if !ok {
+			continue
+		}
+
 		var keepIDs []uint
-		if err := m.db.Model(&MessageLog{}).
-			Where("group_id = ?", groupID).
+		if err := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).
 			Order("created_at DESC").
 			Limit(keepLatest).
 			Pluck("id", &keepIDs).Error; err != nil {
-			zap.L().Warn("清理消息日志失败：获取保留ID失败", zap.Int64("group_id", groupID), zap.Error(err))
+			zap.L().Warn("清理消息日志失败：获取保留ID失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 			continue
 		}
 		if len(keepIDs) == 0 {
 			continue
 		}
 
-		result := m.db.Where("group_id = ? AND id NOT IN ?", groupID, keepIDs).Delete(&MessageLog{})
+		result := scopeMessageLogs(ref, m.db.Where("id NOT IN ?", keepIDs)).Delete(&MessageLog{})
 		if result.Error != nil {
-			zap.L().Warn("清理消息日志失败：删除旧记录失败", zap.Int64("group_id", groupID), zap.Error(result.Error))
+			zap.L().Warn("清理消息日志失败：删除旧记录失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(result.Error))
 			continue
 		}
 		if result.RowsAffected > 0 {
-			zap.L().Info("消息日志已清理", zap.Int64("group_id", groupID), zap.Int("deleted", int(result.RowsAffected)))
+			zap.L().Info("消息日志已清理", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Int("deleted", int(result.RowsAffected)))
 		}
 	}
 }
 
 // milvusVectorSearch 使用 Milvus 进行向量搜索并返回完整的 Memory 对象
-func (m *Manager) milvusVectorSearch(ctx context.Context, queryEmb []float64, groupID int64, memType string, limit int, threshold float64) ([]Memory, error) {
-	results, err := m.milvus.Search(ctx, queryEmb, groupID, memType, limit, threshold)
+func (m *Manager) milvusVectorSearch(ctx context.Context, queryEmb []float64, refID string, memType string, limit int, threshold float64) ([]Memory, error) {
+	results, err := m.milvus.Search(ctx, queryEmb, refID, memType, limit, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -417,6 +449,10 @@ func (m *Manager) milvusVectorSearch(ctx context.Context, queryEmb []float64, gr
 	}
 
 	return sortedMemories, nil
+}
+
+func normalizeMemoryTypeFilter(memType MemoryType) string {
+	return strings.TrimSpace(string(memType))
 }
 
 // ==================== 风格卡片 ====================
@@ -456,7 +492,7 @@ func (m *Manager) SaveStyleCardCandidate(ctx context.Context, card *StyleCard) (
 	searchResults, err := m.styleCardMilvus.Search(
 		ctx,
 		embedding,
-		card.GroupID,
+		card.ConversationID,
 		styleCardVectorKey(card.Intent, card.Tone),
 		3,
 		0.92,
@@ -520,14 +556,8 @@ func (m *Manager) SearchStyleCards(groupID int64, keyword string, limit int) ([]
 	q := m.db.Model(&StyleCard{}).Where("status = ?", StyleCardStatusActive)
 	if strings.TrimSpace(keyword) != "" {
 		keywords := strings.Fields(keyword)
-		likeConditions := make([]string, 0, len(keywords))
-		args := make([]interface{}, 0, len(keywords)*4)
-		for _, kw := range keywords {
-			likeConditions = append(likeConditions, "trigger_rule LIKE ? OR avoid_rule LIKE ? OR example LIKE ? OR source_excerpt LIKE ?")
-			pattern := "%" + kw + "%"
-			args = append(args, pattern, pattern, pattern, pattern)
-		}
-		q = q.Where(strings.Join(likeConditions, " OR "), args...)
+		condition, args := buildLikeQuery([]string{"trigger_rule", "avoid_rule", "example", "source_excerpt"}, keywords)
+		q = q.Where(condition, args...)
 	}
 	if limit <= 0 {
 		limit = 10
@@ -658,7 +688,7 @@ func (m *Manager) insertStyleCardVector(ctx context.Context, card *StyleCard, em
 	if card == nil || m.styleCardMilvus == nil {
 		return nil
 	}
-	if _, err := m.styleCardMilvus.Insert(ctx, card.ID, card.GroupID, styleCardVectorKey(card.Intent, card.Tone), embedding); err != nil {
+	if _, err := m.styleCardMilvus.Insert(ctx, card.ID, card.ConversationID, styleCardVectorKey(card.Intent, card.Tone), embedding); err != nil {
 		return fmt.Errorf("插入风格卡片向量失败: %w", err)
 	}
 	return nil
@@ -730,34 +760,38 @@ func mergeStyleCardSourceExcerpt(existing, candidate string) string {
 // ==================== 黑话管理 ====================
 
 // SearchJargons 搜索黑话（通过关键词匹配，本群优先）
-func (m *Manager) SearchJargons(groupID int64, keyword string, limit int) ([]Jargon, error) {
+func (m *Manager) SearchJargonsByConversation(ref ConversationRef, keyword string, limit int) ([]Jargon, error) {
 	var jargons []Jargon
-	q := m.db.Model(&Jargon{}).Where("rejected = ?", false)
+	q := scopeConversation(ref, m.db.Model(&Jargon{}).Where("rejected = ?", false), conversationFields)
 
 	// 使用 strings.Fields 切割关键词，挨个模糊匹配
 	if keyword != "" {
 		keywords := strings.Fields(keyword)
 		if len(keywords) > 0 {
-			likeConditions := make([]string, 0, len(keywords))
-			args := make([]interface{}, 0, len(keywords))
-			for _, kw := range keywords {
-				likeConditions = append(likeConditions, "content LIKE ?")
-				args = append(args, "%"+kw+"%")
-			}
-			q = q.Where(strings.Join(likeConditions, " OR "), args...)
+			condition, args := buildLikeQuery([]string{"content"}, keywords)
+			q = q.Where(condition, args...)
 		}
 	}
 
-	// 本群优先排序：本群的排在前面，然后按 checked 降序
-	err := q.Order(fmt.Sprintf("CASE WHEN group_id = %d THEN 0 ELSE 1 END, checked DESC", groupID)).
-		Limit(limit).Find(&jargons).Error
-	return jargons, err
+	switch {
+	case ref.IsGroup():
+		err := q.Order(fmt.Sprintf("CASE WHEN group_id = %d THEN 0 ELSE 1 END, checked DESC", ref.GroupID)).
+			Limit(limit).Find(&jargons).Error
+		return jargons, err
+	case ref.IsPrivate():
+		err := q.Order("checked DESC").Limit(limit).Find(&jargons).Error
+		return jargons, err
+	default:
+		err := q.Order("checked DESC").Limit(limit).Find(&jargons).Error
+		return jargons, err
+	}
 }
 
 // SaveJargon 保存黑话/术语
 func (m *Manager) SaveJargon(jargon *Jargon) error {
 	var existing Jargon
-	err := m.db.Where("group_id = ? AND content = ?", jargon.GroupID, jargon.Content).First(&existing).Error
+	q := scopeConversation(conversationRefFromJargon(jargon), m.db.Model(&Jargon{}), conversationFields).Where("content = ?", jargon.Content)
+	err := q.First(&existing).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return m.db.Create(jargon).Error
@@ -772,6 +806,19 @@ func (m *Manager) SaveJargon(jargon *Jargon) error {
 		"rejected": false,
 	}
 	return m.db.Model(&existing).Updates(updates).Error
+}
+
+func conversationRefFromJargon(jargon *Jargon) ConversationRef {
+	if jargon == nil {
+		return AllConversationRef()
+	}
+	if jargon.GroupID > 0 {
+		return GroupConversationRef(jargon.GroupID)
+	}
+	if jargon.UserID > 0 {
+		return PrivateConversationRef(jargon.UserID)
+	}
+	return AllConversationRef()
 }
 
 // BatchReviewJargon 批量审核黑话
@@ -791,10 +838,12 @@ func (m *Manager) BatchReviewJargon(ids []uint, approve bool) error {
 }
 
 // GetUncheckedJargons 获取待审核的黑话
-func (m *Manager) GetUncheckedJargons(groupID int64, limit int) ([]Jargon, error) {
+func (m *Manager) GetUncheckedJargonsByConversation(ref ConversationRef, limit int) ([]Jargon, error) {
 	var jargons []Jargon
-	err := m.db.Where("group_id = ? AND checked = ?", groupID, false).
-		Limit(limit).Find(&jargons).Error
+	err := scopeConversation(ref, m.db.Model(&Jargon{}), conversationFields).
+		Where("checked = ?", false).
+		Limit(limit).
+		Find(&jargons).Error
 	return jargons, err
 }
 
@@ -808,8 +857,8 @@ func (m *Manager) GetAllApprovedJargons() ([]Jargon, error) {
 // ==================== 成员画像 ====================
 
 // GetMemberProfile 获取成员画像
-func (m *Manager) GetMemberProfile(userID int64) (*MemberProfile, error) {
-	var profile MemberProfile
+func (m *Manager) GetMemberProfile(userID int64) (*UserProfile, error) {
+	var profile UserProfile
 	err := m.db.Where("user_id = ?", userID).First(&profile).Error
 	if err != nil {
 		return nil, err
@@ -818,17 +867,20 @@ func (m *Manager) GetMemberProfile(userID int64) (*MemberProfile, error) {
 }
 
 // GetOrCreateMemberProfile 获取或创建成员画像
-func (m *Manager) GetOrCreateMemberProfile(userID int64, nickname string) (*MemberProfile, error) {
-	var profile MemberProfile
+func (m *Manager) GetOrCreateMemberProfile(userID int64, nickname string) (*UserProfile, error) {
+	var profile UserProfile
 	err := m.db.Where("user_id = ?", userID).First(&profile).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		profile = MemberProfile{
-			UserID:    userID,
-			Nickname:  nickname,
-			Activity:  0.5, // 初始活跃度
-			Intimacy:  0.3, // 初始亲密度
-			LastSpeak: time.Now(),
+		profile = UserProfile{
+			UserID:      userID,
+			Nickname:    nickname,
+			Activity:    0.5, // 初始活跃度
+			Intimacy:    0.3, // 初始亲密度
+			Trust:       0.4,
+			Familiarity: 0.2,
+			Respect:     0.5,
+			LastSpeak:   time.Now(),
 		}
 		if err := m.db.Create(&profile).Error; err != nil {
 			return nil, err
@@ -838,8 +890,8 @@ func (m *Manager) GetOrCreateMemberProfile(userID int64, nickname string) (*Memb
 	return &profile, err
 }
 
-// UpdateMemberProfile 更新成员画像
-func (m *Manager) UpdateMemberProfile(profile *MemberProfile) error {
+// UpdateUserProfile 更新用户画像
+func (m *Manager) UpdateUserProfile(profile *UserProfile) error {
 	// 计算活跃度：基于最近发言时间和消息数量
 	// 活跃度衰减：每天降低0.1，最低0.1
 	daysSinceLastSpeak := time.Since(profile.LastSpeak).Hours() / 24
@@ -866,7 +918,7 @@ func (m *Manager) GetStats() map[string]int64 {
 	stats := make(map[string]int64)
 	var memories, members, messages, styleCards, jargons int64
 	m.db.Model(&Memory{}).Count(&memories)
-	m.db.Model(&MemberProfile{}).Count(&members)
+	m.db.Model(&UserProfile{}).Count(&members)
 	m.db.Model(&MessageLog{}).Count(&messages)
 	m.db.Model(&StyleCard{}).Count(&styleCards)
 	m.db.Model(&Jargon{}).Count(&jargons)
@@ -880,14 +932,11 @@ func (m *Manager) GetStats() map[string]int64 {
 
 // ==================== 列表查询（供管理界面用）====================
 
-func (m *Manager) ListMemories(groupID int64, memType string, page, pageSize int) ([]Memory, int64, error) {
+func (m *Manager) ListMemoriesByConversation(ref ConversationRef, memType string, page, pageSize int) ([]Memory, int64, error) {
 	var items []Memory
 	var total int64
 
-	q := m.db.Model(&Memory{})
-	if groupID > 0 {
-		q = q.Where("group_id = ?", groupID)
-	}
+	q := scopeConversation(ref, m.db.Model(&Memory{}), conversationFields)
 	if memType != "" {
 		q = q.Where("type = ?", memType)
 	}
@@ -897,25 +946,22 @@ func (m *Manager) ListMemories(groupID int64, memType string, page, pageSize int
 	return items, total, err
 }
 
-func (m *Manager) ListMemberProfiles(page, pageSize int) ([]MemberProfile, int64, error) {
-	var items []MemberProfile
+func (m *Manager) ListMemberProfiles(page, pageSize int) ([]UserProfile, int64, error) {
+	var items []UserProfile
 	var total int64
 
-	q := m.db.Model(&MemberProfile{})
+	q := m.db.Model(&UserProfile{})
 	q.Count(&total)
 
 	err := q.Order("msg_count DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error
 	return items, total, err
 }
 
-func (m *Manager) ListMessageLogs(groupID int64, page, pageSize int) ([]MessageLog, int64, error) {
+func (m *Manager) ListMessageLogsByConversation(ref ConversationRef, page, pageSize int) ([]MessageLog, int64, error) {
 	var items []MessageLog
 	var total int64
 
-	q := m.db.Model(&MessageLog{})
-	if groupID > 0 {
-		q = q.Where("group_id = ?", groupID)
-	}
+	q := scopeMessageLogs(ref, m.db.Model(&MessageLog{}))
 	q.Count(&total)
 
 	err := q.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error
@@ -1040,16 +1086,21 @@ func (m *Manager) startMoodDecay() {
 	zap.L().Info("情绪衰减任务已启动")
 }
 
-// GetMoodState 获取当前情绪状态
-func (m *Manager) GetMoodState() (*MoodState, error) {
+// GetMoodState 获取某个用户的情绪状态
+func (m *Manager) GetMoodState(userID int64) (*MoodState, error) {
+	if userID == 0 {
+		return nil, fmt.Errorf("userID 不能为空")
+	}
 	var mood MoodState
-	err := m.db.First(&mood).Error
+	err := m.db.Where("user_id = ?", userID).First(&mood).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// 不存在则创建默认情绪
 		mood = MoodState{
+			UserID:      userID,
 			Valence:     0.0,
 			Energy:      0.5,
 			Sociability: 0.5,
+			Irritation:  0.0,
+			Curiosity:   0.5,
 		}
 		if err := m.db.Create(&mood).Error; err != nil {
 			return nil, err
@@ -1062,17 +1113,18 @@ func (m *Manager) GetMoodState() (*MoodState, error) {
 	return &mood, nil
 }
 
-// UpdateMoodState 更新情绪状态（增量更新）
-func (m *Manager) UpdateMoodState(valenceDelta, energyDelta, sociabilityDelta float64, reason string) (*MoodState, error) {
-	mood, err := m.GetMoodState()
+// UpdateMoodState 更新某个用户的情绪状态（增量更新）
+func (m *Manager) UpdateMoodState(userID int64, valenceDelta, energyDelta, sociabilityDelta, irritationDelta, curiosityDelta float64, reason string) (*MoodState, error) {
+	mood, err := m.GetMoodState(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 应用增量
 	mood.Valence = utils.ClampFloat64(mood.Valence+valenceDelta, -1.0, 1.0)
 	mood.Energy = utils.ClampFloat64(mood.Energy+energyDelta, 0.0, 1.0)
 	mood.Sociability = utils.ClampFloat64(mood.Sociability+sociabilityDelta, 0.0, 1.0)
+	mood.Irritation = utils.ClampFloat64(mood.Irritation+irritationDelta, 0.0, 1.0)
+	mood.Curiosity = utils.ClampFloat64(mood.Curiosity+curiosityDelta, 0.0, 1.0)
 	mood.LastReason = reason
 
 	if err := m.db.Save(mood).Error; err != nil {
@@ -1083,20 +1135,21 @@ func (m *Manager) UpdateMoodState(valenceDelta, energyDelta, sociabilityDelta fl
 
 // ApplyMoodDecay 应用情绪自然衰减
 func (m *Manager) ApplyMoodDecay() error {
-	mood, err := m.GetMoodState()
-	if err != nil {
+	var moods []MoodState
+	if err := m.db.Find(&moods).Error; err != nil {
 		return err
 	}
-
-	// 衰减公式：
-	// valence *= 0.95 (向0衰减)
-	// energy += (0.5 - energy) * 0.05 (向0.5衰减)
-	// sociability += (0.5 - sociability) * 0.05 (向0.5衰减)
-	mood.Valence *= 0.95
-	mood.Energy += (0.5 - mood.Energy) * 0.05
-	mood.Sociability += (0.5 - mood.Sociability) * 0.05
-
-	return m.db.Save(mood).Error
+	for i := range moods {
+		moods[i].Valence *= 0.95
+		moods[i].Energy += (0.5 - moods[i].Energy) * 0.05
+		moods[i].Sociability += (0.5 - moods[i].Sociability) * 0.05
+		moods[i].Irritation += (0.0 - moods[i].Irritation) * 0.08
+		moods[i].Curiosity += (0.5 - moods[i].Curiosity) * 0.05
+		if err := m.db.Save(&moods[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ==================== 学习状态管理 ====================
