@@ -14,6 +14,7 @@ import (
 	"mumu-bot/internal/memory"
 	"mumu-bot/internal/onebot"
 	"mumu-bot/internal/persona"
+	"mumu-bot/internal/prompt"
 	"mumu-bot/internal/session"
 	"mumu-bot/internal/tools"
 	"mumu-bot/internal/utils"
@@ -41,19 +42,21 @@ const (
 
 // Agent 沐沐智能体
 type Agent struct {
-	ctx             context.Context
-	cancel          context.CancelFunc
-	persona         *persona.Persona
-	memory          *memory.Manager
-	model           model.ToolCallingChatModel
-	auxModel        model.ToolCallingChatModel
-	vision          *llm.VisionClient // 多模态视觉模型
-	bot             *onebot.Client
-	react           *react.Agent
-	styleClassifier *react.Agent
-	tools           []tool.BaseTool
-	mcpMgr          *mcp.Manager        // MCP 管理器
-	concurrencyMgr  *ConcurrencyManager // 并发管理器
+	ctx              context.Context
+	cancel           context.CancelFunc
+	persona          *persona.Persona
+	memory           *memory.Manager
+	model            model.ToolCallingChatModel
+	auxModel         model.ToolCallingChatModel
+	vision           *llm.VisionClient // 多模态视觉模型
+	bot              *onebot.Client
+	react            *react.Agent
+	styleClassifier  *react.Agent
+	tools            []tool.BaseTool
+	mcpMgr           *mcp.Manager        // MCP 管理器
+	concurrencyMgr   *ConcurrencyManager // 并发管理器
+	contextAssembler *ContextAssembler
+	promptBuilder    *prompt.Builder
 
 	jargonMgr *jargon.Manager   // 黑话管理器
 	learner   *learning.Learner // 后台学习系统
@@ -107,14 +110,15 @@ func New(mem *memory.Manager) (*Agent, error) {
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	a := &Agent{
-		ctx:      rootCtx,
-		cancel:   cancel,
-		persona:  p,
-		memory:   mem,
-		model:    chatModel,
-		vision:   visionClient,
-		bot:      botClient,
-		sessions: make(map[string]*session.Session[*onebot.Message]),
+		ctx:           rootCtx,
+		cancel:        cancel,
+		persona:       p,
+		memory:        mem,
+		model:         chatModel,
+		vision:        visionClient,
+		bot:           botClient,
+		promptBuilder: prompt.NewBuilder(&cfg.Persona),
+		sessions:      make(map[string]*session.Session[*onebot.Message]),
 	}
 
 	zap.L().Info("人格已加载", zap.String("name", a.persona.GetName()))
@@ -162,6 +166,7 @@ func New(mem *memory.Manager) (*Agent, error) {
 		a.cancel()
 		return nil, err
 	}
+	a.contextAssembler = NewContextAssembler(a.ctx, a.memory, a.bot, a.jargonMgr, a.styleClassifier)
 	return a, nil
 }
 
@@ -987,73 +992,18 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool)
 		},
 	})
 
-	// 构建对话上下文
-	chatContext := a.buildChatContext(sess, lastProcessedTime)
-	if chatContext == "" {
+	assembled := a.contextAssembler.Assemble(ctx, sess, lastProcessedTime, fromLoop)
+	if assembled == nil || assembled.PromptContext == nil || assembled.ChatContext == "" {
 		return
 	}
-
-	// 构建动态 prompt 上下文
-	promptCtx := &persona.PromptContext{
-		Ref: ref,
-	}
-	if fromLoop {
-		promptCtx.LoopInfo = a.buildLoopContext(sess)
-	}
-	// 主动记忆检索
-	if config.Get().Agent.EnableActiveRetrieval {
-		promptCtx.RelatedMemories, promptCtx.CrossGroupExperiences = a.buildMemoryContext(ctx, sess)
-	}
-
-	// 获取当前目标用户的情绪状态
-	if targetUserID := a.resolveMoodTargetUserID(sess); targetUserID > 0 {
-		if mood, err := a.memory.GetMoodState(targetUserID); err == nil {
-			promptCtx.MoodState = &persona.MoodInfo{
-				Valence:     mood.Valence,
-				Energy:      mood.Energy,
-				Sociability: mood.Sociability,
-				Irritation:  mood.Irritation,
-				Curiosity:   mood.Curiosity,
-			}
-		}
-	}
-
-	// 注入黑话/梗的解释（AC自动机匹配）
-	if a.jargonMgr != nil {
-		promptCtx.JargonMatches = a.jargonMgr.Match(chatContext)
-	}
-	if ref.IsGroup() {
-		promptCtx.GroupInfo = a.buildGroupContext(sess)
-		promptCtx.StyleHints = a.buildStyleHintContext(ctx, sess)
-	} else if ref.IsPrivate() {
-		promptCtx.PeerInfo = a.buildPrivatePeerContext(sess)
-	}
-
-	// 获取最近在场的人
-	recentPeople := ""
-	if ref.IsGroup() {
-		recentPeople = a.buildRecentPeopleContext(sess)
-	}
-
-	// 构建消息
-	systemPrompt := a.persona.GetSystemPrompt(ref)
-
-	// 添加专属额外提示词
-	extraPrompt := ""
-	if ref.IsGroup() {
-		if gc := config.Get().GetGroupConfig(ref.GroupID); gc != nil && gc.ExtraPrompt != "" {
-			extraPrompt = gc.ExtraPrompt
-		}
-	} else if ref.IsPrivate() {
-		if uc := config.Get().GetUserConfig(ref.UserID); uc != nil && uc.ExtraPrompt != "" {
-			extraPrompt = uc.ExtraPrompt
-		}
-	}
-
-	thinkPrompt := a.persona.GetThinkPrompt(promptCtx, chatContext, extraPrompt, recentPeople)
-	if isMention && ref.IsGroup() {
-		thinkPrompt += "\n\n注意：有人提到你了，可能在找你说话，你可以看情况回复。"
-	}
+	systemPrompt := a.promptBuilder.BuildSystemPrompt(ref)
+	thinkPrompt := a.promptBuilder.BuildThinkPrompt(prompt.BuildInput{
+		Context:      assembled.PromptContext,
+		ChatContext:  assembled.ChatContext,
+		ExtraPrompt:  assembled.ExtraPrompt,
+		RecentPeople: assembled.RecentPeople,
+		IsMention:    isMention,
+	})
 
 	// 调试：显示系统提示词
 	if config.Get().Debug.ShowPrompt {
