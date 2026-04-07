@@ -1,22 +1,22 @@
 package memory
 
 import (
-	"mumu-bot/internal/conversation"
+	"mumu-bot/internal/session"
 	"time"
 )
 
-type ConversationRef = conversation.Ref
+type ConversationRef = session.Ref
 
 func AllConversationRef() ConversationRef {
-	return conversation.AllConversationRef()
+	return session.AllConversationRef()
 }
 
 func GroupConversationRef(groupID int64) ConversationRef {
-	return conversation.GroupConversationRef(groupID)
+	return session.GroupConversationRef(groupID)
 }
 
 func PrivateConversationRef(userID int64) ConversationRef {
-	return conversation.PrivateConversationRef(userID)
+	return session.PrivateConversationRef(userID)
 }
 
 // MemoryType 记忆类型

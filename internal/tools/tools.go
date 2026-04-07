@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"mumu-bot/internal/config"
-	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/jargon"
 	"mumu-bot/internal/memory"
 	"mumu-bot/internal/onebot"
+	"mumu-bot/internal/session"
 	"strings"
 	"sync"
 	"time"
@@ -21,14 +21,14 @@ import (
 )
 
 // SpeakCallback 发言回调函数类型，返回消息ID
-type SpeakCallback func(ctx context.Context, ref conversation.Ref, content string, replyTo int64, mentions []int64) (int64, error)
+type SpeakCallback func(ctx context.Context, ref session.Ref, content string, replyTo int64, mentions []int64) (int64, error)
 
 // SendStickerCallback 发送表情包回调函数类型
-type SendStickerCallback func(ctx context.Context, ref conversation.Ref, filePath string, description string) (int64, error)
+type SendStickerCallback func(ctx context.Context, ref session.Ref, filePath string, description string) (int64, error)
 
 // ToolContext 工具执行上下文
 type ToolContext struct {
-	ConversationRef     conversation.Ref
+	Session             *session.Session[*onebot.Message]
 	MemoryMgr           *memory.Manager
 	Bot                 *onebot.Client
 	SpeakCallback       SpeakCallback       // 发言回调
@@ -57,6 +57,13 @@ func GetToolContext(ctx context.Context) *ToolContext {
 	return nil
 }
 
+func (tc *ToolContext) SessionRef() session.Ref {
+	if tc == nil || tc.Session == nil {
+		return session.Ref{}
+	}
+	return tc.Session.Ref
+}
+
 // MarkToolCallSeen 记录本轮 think 中已执行过的工具调用。
 // 同一个 ToolContext 只在单个群、单轮思考内使用，因此这里的缓存天然是按群按轮隔离的。
 func (tc *ToolContext) MarkToolCallSeen(toolName string, arguments string) bool {
@@ -77,7 +84,7 @@ func (tc *ToolContext) MarkToolCallSeen(toolName string, arguments string) bool 
 
 // LearningContext 学习任务上下文
 type LearningContext struct {
-	ConversationRef conversation.Ref
+	ConversationRef session.Ref
 	MemMgr          *memory.Manager
 	JargonMgr       *jargon.Manager
 }
@@ -100,7 +107,10 @@ func GetLearningContext(ctx context.Context) *LearningContext {
 // GetConversationID 从工具或学习上下文中提取当前会话 ID。
 func GetConversationID(ctx context.Context) string {
 	if tc := GetToolContext(ctx); tc != nil {
-		return tc.ConversationRef.ID()
+		if tc.Session != nil {
+			return tc.Session.Ref.ID()
+		}
+		return ""
 	}
 	if lc := GetLearningContext(ctx); lc != nil {
 		return lc.ConversationRef.ID()
@@ -174,8 +184,12 @@ func getGroupMemberDetailFunc(ctx context.Context, input *GetGroupMemberDetailIn
 	if input.UserID == 0 {
 		return &GetGroupMemberDetailOutput{Success: false, Message: "用户 ID 不能为空"}, nil
 	}
+	ref := tc.SessionRef()
+	if ref.ID() == "" {
+		return &GetGroupMemberDetailOutput{Success: false, Message: "会话未初始化"}, nil
+	}
 
-	info, err := tc.Bot.GetGroupMemberInfo(ctx, tc.ConversationRef.GroupID, input.UserID, false)
+	info, err := tc.Bot.GetGroupMemberInfo(ctx, ref.GroupID, input.UserID, false)
 	if err != nil {
 		return &GetGroupMemberDetailOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -232,8 +246,12 @@ func getRecentMessagesFunc(ctx context.Context, input *GetRecentMessagesInput) (
 	if limit <= 0 {
 		limit = 40
 	}
+	ref := tc.SessionRef()
+	if ref.ID() == "" {
+		return &GetRecentMessagesOutput{Success: false, Message: "会话未初始化"}, nil
+	}
 
-	messages := tc.MemoryMgr.GetRecentMessages(tc.ConversationRef, limit, input.Offset)
+	messages := tc.MemoryMgr.GetRecentMessages(ref, limit, input.Offset)
 	results := make([]map[string]interface{}, 0, len(messages))
 	for _, m := range messages {
 		results = append(results, map[string]interface{}{
@@ -286,8 +304,12 @@ func getGroupNoticesFunc(ctx context.Context, input *GetGroupNoticesInput) (*Get
 	if tc.Bot == nil {
 		return &GetGroupNoticesOutput{Success: false, Message: "Bot 未连接"}, nil
 	}
+	ref := tc.SessionRef()
+	if !ref.IsGroup() {
+		return &GetGroupNoticesOutput{Success: false, Message: "当前不是群聊会话"}, nil
+	}
 
-	notices, err := tc.Bot.GetGroupNotice(ctx, tc.ConversationRef.GroupID)
+	notices, err := tc.Bot.GetGroupNotice(ctx, ref.GroupID)
 	if err != nil {
 		return &GetGroupNoticesOutput{Success: false, Message: "获取群公告失败: " + err.Error()}, nil
 	}
@@ -349,8 +371,12 @@ func getEssenceMessagesFunc(ctx context.Context, input *GetEssenceMessagesInput)
 	if tc.Bot == nil {
 		return &GetEssenceMessagesOutput{Success: false, Message: "Bot 未连接"}, nil
 	}
+	ref := tc.SessionRef()
+	if !ref.IsGroup() {
+		return &GetEssenceMessagesOutput{Success: false, Message: "当前不是群聊会话"}, nil
+	}
 
-	messages, err := tc.Bot.GetEssenceMessages(ctx, tc.ConversationRef.GroupID)
+	messages, err := tc.Bot.GetEssenceMessages(ctx, ref.GroupID)
 	if err != nil {
 		return &GetEssenceMessagesOutput{Success: false, Message: "获取群精华消息失败: " + err.Error()}, nil
 	}

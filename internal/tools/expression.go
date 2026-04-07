@@ -209,8 +209,12 @@ func searchStyleCardsFunc(ctx context.Context, input *SearchStyleCardsInput) (*S
 	if limit <= 0 {
 		limit = 10
 	}
+	ref := tc.SessionRef()
+	if !ref.IsGroup() {
+		return &SearchStyleCardsOutput{Success: false, Message: "当前不是群聊会话"}, nil
+	}
 
-	cards, err := tc.MemoryMgr.SearchStyleCards(tc.ConversationRef.GroupID, input.Keyword, limit)
+	cards, err := tc.MemoryMgr.SearchStyleCards(ref.GroupID, input.Keyword, limit)
 	if err != nil {
 		return &SearchStyleCardsOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -225,7 +229,7 @@ func searchStyleCardsFunc(ctx context.Context, input *SearchStyleCardsInput) (*S
 			"avoid_rule":         card.AvoidRule,
 			"example":            card.Example,
 			"evidence_count":     card.EvidenceCount,
-			"from_current_group": card.GroupID == tc.ConversationRef.GroupID,
+			"from_current_group": card.GroupID == ref.GroupID,
 		})
 	}
 

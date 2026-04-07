@@ -7,7 +7,6 @@ import (
 	"math"
 	"math/rand"
 	"mumu-bot/internal/config"
-	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/jargon"
 	"mumu-bot/internal/learning"
 	"mumu-bot/internal/llm"
@@ -15,6 +14,7 @@ import (
 	"mumu-bot/internal/memory"
 	"mumu-bot/internal/onebot"
 	"mumu-bot/internal/persona"
+	"mumu-bot/internal/session"
 	"mumu-bot/internal/tools"
 	"mumu-bot/internal/utils"
 	"os"
@@ -58,35 +58,18 @@ type Agent struct {
 	jargonMgr *jargon.Manager   // 黑话管理器
 	learner   *learning.Learner // 后台学习系统
 
-	// 消息缓冲
-	buffers   map[string]*utils.RingBuffer[*onebot.Message]
-	buffersMu sync.RWMutex
-
-	// 思考聚合窗口
-	pendingThinks map[string]*pendingThink
-	pendingMu     sync.Mutex
-
-	// 正在处理中的会话和最后处理时间
-	processing        map[string]bool
-	lastProcessedTime map[string]time.Time
-	lastLoopThinkTime map[string]time.Time
-	processingMu      sync.RWMutex
+	// 会话运行时
+	sessions   map[string]*session.Session[*onebot.Message]
+	sessionsMu sync.RWMutex
 
 	wg sync.WaitGroup
-}
-
-type pendingThink struct {
-	timer      *time.Timer
-	isMention  bool
-	fromLoop   bool
-	generation uint64
 }
 
 func messageConversationRef(msg *onebot.Message) memory.ConversationRef {
 	if msg == nil {
 		return memory.AllConversationRef()
 	}
-	if ref, ok := conversation.ParseRefID(msg.ConversationID); ok {
+	if ref, ok := session.ParseRefID(msg.ConversationID); ok {
 		return ref
 	}
 	return memory.AllConversationRef()
@@ -124,18 +107,14 @@ func New(mem *memory.Manager) (*Agent, error) {
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	a := &Agent{
-		ctx:               rootCtx,
-		cancel:            cancel,
-		persona:           p,
-		memory:            mem,
-		model:             chatModel,
-		vision:            visionClient,
-		bot:               botClient,
-		buffers:           make(map[string]*utils.RingBuffer[*onebot.Message]),
-		pendingThinks:     make(map[string]*pendingThink),
-		processing:        make(map[string]bool),
-		lastProcessedTime: make(map[string]time.Time),
-		lastLoopThinkTime: make(map[string]time.Time),
+		ctx:      rootCtx,
+		cancel:   cancel,
+		persona:  p,
+		memory:   mem,
+		model:    chatModel,
+		vision:   visionClient,
+		bot:      botClient,
+		sessions: make(map[string]*session.Session[*onebot.Message]),
 	}
 
 	zap.L().Info("人格已加载", zap.String("name", a.persona.GetName()))
@@ -348,19 +327,11 @@ func (a *Agent) loadBuffersFromDB() {
 }
 
 func (a *Agent) loadMessages(ref memory.ConversationRef, bufSize int, logs []memory.MessageLog) {
-	// 获取缓冲区大小
-	if bufSize <= 0 {
-		bufSize = 15
-	}
-	// 从数据库获取最近的消息
 	if len(logs) == 0 {
 		return
 	}
-	// 初始化缓冲区
-	a.buffersMu.Lock()
-	buf := utils.NewRingBuffer[*onebot.Message](bufSize)
-	a.buffers[ref.ID()] = buf
-	// 填充缓冲区
+
+	sess := session.NewSession[*onebot.Message](ref, a.sessionBufferSize(ref, bufSize))
 	for _, log := range logs {
 		msgID, _ := strconv.ParseInt(log.MessageID, 10, 64)
 
@@ -382,9 +353,12 @@ func (a *Agent) loadMessages(ref memory.ConversationRef, bufSize int, logs []mem
 			MessageSource:  onebot.MessageSource(log.MessageSource),
 			Forwards:       forwards,
 		}
-		buf.Push(msg)
+		sess.Push(msg)
 	}
-	a.buffersMu.Unlock()
+
+	a.sessionsMu.Lock()
+	a.sessions[ref.ID()] = sess
+	a.sessionsMu.Unlock()
 }
 
 // Stop 停止
@@ -600,33 +574,65 @@ func (a *Agent) addBuffer(msg *onebot.Message) {
 		zap.L().Error("消息缺少有效会话信息", zap.Any("msg", msg))
 		return
 	}
-	a.buffersMu.Lock()
-	defer a.buffersMu.Unlock()
-	buf, ok := a.buffers[ref.ID()]
-	if !ok {
-		bufSize := config.Get().Agent.MessageBufferSizeGroup
-		if ref.IsPrivate() {
-			bufSize = config.Get().Agent.MessageBufferSizePrivate
-			if bufSize <= 0 {
-				bufSize = 50
-			}
-		} else if bufSize <= 0 {
-			bufSize = 15
-		}
-		buf = utils.NewRingBuffer[*onebot.Message](bufSize)
-		a.buffers[ref.ID()] = buf
-	}
-	buf.Push(msg)
-}
-func (a *Agent) getBuffer(ref memory.ConversationRef) []*onebot.Message {
-	a.buffersMu.RLock()
-	buf, ok := a.buffers[ref.ID()]
-	a.buffersMu.RUnlock()
 
-	if !ok || buf.IsEmpty() {
+	a.getOrCreateSession(ref, 0).Push(msg)
+}
+
+func (a *Agent) getBuffer(ref memory.ConversationRef) []*onebot.Message {
+	session := a.getSession(ref)
+	if session == nil {
 		return nil
 	}
-	return buf.GetAll()
+	return session.Messages()
+}
+
+func (a *Agent) getSession(ref memory.ConversationRef) *session.Session[*onebot.Message] {
+	if ref.ID() == "" {
+		return nil
+	}
+
+	a.sessionsMu.RLock()
+	session := a.sessions[ref.ID()]
+	a.sessionsMu.RUnlock()
+	return session
+}
+
+func (a *Agent) getOrCreateSession(ref memory.ConversationRef, capacity int) *session.Session[*onebot.Message] {
+	if ref.ID() == "" {
+		return nil
+	}
+	if session := a.getSession(ref); session != nil {
+		return session
+	}
+
+	a.sessionsMu.Lock()
+	defer a.sessionsMu.Unlock()
+
+	if session := a.sessions[ref.ID()]; session != nil {
+		return session
+	}
+
+	sess := session.NewSession[*onebot.Message](ref, a.sessionBufferSize(ref, capacity))
+	a.sessions[ref.ID()] = sess
+	return sess
+}
+
+func (a *Agent) sessionBufferSize(ref memory.ConversationRef, fallback int) int {
+	if fallback > 0 {
+		return fallback
+	}
+
+	if ref.IsPrivate() {
+		if size := config.Get().Agent.MessageBufferSizePrivate; size > 0 {
+			return size
+		}
+		return 50
+	}
+
+	if size := config.Get().Agent.MessageBufferSizeGroup; size > 0 {
+		return size
+	}
+	return 15
 }
 
 func (a *Agent) updateMember(msg *onebot.Message) {
@@ -712,9 +718,10 @@ func (a *Agent) thinkCycle() {
 			continue
 		}
 
-		a.processingMu.RLock()
-		lastLoopAt := a.lastLoopThinkTime[ref.ID()]
-		a.processingMu.RUnlock()
+		lastLoopAt := time.Time{}
+		if session := a.getSession(ref); session != nil {
+			lastLoopAt = session.LastLoopThinkTime()
+		}
 		if !lastLoopAt.IsZero() && time.Since(lastLoopAt) < time.Duration(cfg.Agent.ThinkInterval)*time.Second {
 			zap.L().Debug("私聊 loop 跳过：冷却中",
 				zap.String("id", ref.ID()),
@@ -741,62 +748,45 @@ func (a *Agent) thinkCycle() {
 }
 
 func (a *Agent) scheduleThink(ref memory.ConversationRef, isMention bool, fromLoop bool) {
-	debounce := time.Duration(config.Get().Agent.ThinkDebounceMS) * time.Millisecond
-
-	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
-	if pending, ok := a.pendingThinks[ref.ID()]; ok {
-		pending.isMention = pending.isMention || isMention
-		pending.fromLoop = pending.fromLoop || fromLoop
-		pending.generation++
-		gen := pending.generation
-		pending.timer = time.AfterFunc(debounce, func() {
-			a.flushPendingThink(ref, gen)
-		})
-		return
-	}
-
 	if !fromLoop && !isMention && !ref.IsPrivate() {
 		return
 	}
 
-	pending := &pendingThink{
-		isMention:  isMention,
-		fromLoop:   fromLoop,
-		generation: 1,
-	}
-	gen := pending.generation
-	pending.timer = time.AfterFunc(debounce, func() {
-		a.flushPendingThink(ref, gen)
-	})
-	a.pendingThinks[ref.ID()] = pending
-}
-
-func (a *Agent) flushPendingThink(ref memory.ConversationRef, generation uint64) {
-	a.pendingMu.Lock()
-	pending, ok := a.pendingThinks[ref.ID()]
-	if !ok || pending.generation != generation {
-		a.pendingMu.Unlock()
+	debounce := time.Duration(config.Get().Agent.ThinkDebounceMS) * time.Millisecond
+	session := a.getOrCreateSession(ref, 0)
+	if session == nil {
 		return
 	}
 
-	isMention := pending.isMention
-	fromLoop := pending.fromLoop
-	delete(a.pendingThinks, ref.ID())
-	a.pendingMu.Unlock()
+	session.SchedulePending(debounce, isMention, fromLoop, func(generation uint64) {
+		a.flushPendingThink(ref, generation)
+	})
+}
+
+func (a *Agent) flushPendingThink(ref memory.ConversationRef, generation uint64) {
+	session := a.getSession(ref)
+	if session == nil {
+		return
+	}
+
+	isMention, fromLoop, ok := session.ConsumePending(generation)
+	if !ok {
+		return
+	}
 
 	a.concurrencyMgr.Submit(ref, isMention, fromLoop)
 }
 
 func (a *Agent) clearPendingThinks() {
-	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
+	a.sessionsMu.RLock()
+	sessions := make([]*session.Session[*onebot.Message], 0, len(a.sessions))
+	for _, session := range a.sessions {
+		sessions = append(sessions, session)
+	}
+	a.sessionsMu.RUnlock()
 
-	for key, pending := range a.pendingThinks {
-		if pending.timer != nil {
-			pending.timer.Stop()
-		}
-		delete(a.pendingThinks, key)
+	for _, session := range sessions {
+		session.ClearPending()
 	}
 }
 
@@ -970,42 +960,35 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool)
 	if ref.IsGroup() && a.bot.IsSelfMuted(ref.GroupID) {
 		return
 	}
-	// 并发锁：确保同一时间一个群只有一个思考进程
-	refID := ref.ID()
-	a.processingMu.Lock()
-	if a.processing[refID] {
-		a.processingMu.Unlock()
+
+	sess := a.getOrCreateSession(ref, 0)
+	if sess == nil {
 		return
 	}
-	a.processing[refID] = true
-	lastProcessedTime := a.lastProcessedTime[refID]
-	if fromLoop {
-		a.lastLoopThinkTime[refID] = time.Now()
-	} else {
-		a.lastProcessedTime[refID] = time.Now()
+
+	lastProcessedTime, ok := sess.TryBeginProcessing(fromLoop)
+	if !ok {
+		return
 	}
-	a.processingMu.Unlock()
 
 	defer func() {
-		a.processingMu.Lock()
-		a.processing[refID] = false
-		a.processingMu.Unlock()
+		sess.FinishProcessing()
 	}()
 
 	ctx := tools.WithToolContext(a.ctx, &tools.ToolContext{
-		ConversationRef: ref,
-		MemoryMgr:       a.memory,
-		Bot:             a.bot,
-		SpeakCallback: func(callCtx context.Context, callRef conversation.Ref, content string, replyTo int64, mentions []int64) (int64, error) {
+		Session:   sess,
+		MemoryMgr: a.memory,
+		Bot:       a.bot,
+		SpeakCallback: func(callCtx context.Context, callRef session.Ref, content string, replyTo int64, mentions []int64) (int64, error) {
 			return a.doSpeak(callCtx, callRef, content, replyTo, mentions)
 		},
-		SendStickerCallback: func(callCtx context.Context, callRef conversation.Ref, filePath string, description string) (int64, error) {
+		SendStickerCallback: func(callCtx context.Context, callRef session.Ref, filePath string, description string) (int64, error) {
 			return a.doSendSticker(callCtx, callRef, filePath, description)
 		},
 	})
 
 	// 构建对话上下文
-	chatContext := a.buildChatContext(ref, lastProcessedTime)
+	chatContext := a.buildChatContext(sess, lastProcessedTime)
 	if chatContext == "" {
 		return
 	}
@@ -1015,15 +998,15 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool)
 		Ref: ref,
 	}
 	if fromLoop {
-		promptCtx.LoopInfo = a.buildLoopContext(ref)
+		promptCtx.LoopInfo = a.buildLoopContext(sess)
 	}
 	// 主动记忆检索
 	if config.Get().Agent.EnableActiveRetrieval {
-		promptCtx.RelatedMemories, promptCtx.CrossGroupExperiences = a.buildMemoryContext(ctx, ref)
+		promptCtx.RelatedMemories, promptCtx.CrossGroupExperiences = a.buildMemoryContext(ctx, sess)
 	}
 
 	// 获取当前目标用户的情绪状态
-	if targetUserID := a.resolveMoodTargetUserID(ref); targetUserID > 0 {
+	if targetUserID := a.resolveMoodTargetUserID(sess); targetUserID > 0 {
 		if mood, err := a.memory.GetMoodState(targetUserID); err == nil {
 			promptCtx.MoodState = &persona.MoodInfo{
 				Valence:     mood.Valence,
@@ -1040,16 +1023,16 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool)
 		promptCtx.JargonMatches = a.jargonMgr.Match(chatContext)
 	}
 	if ref.IsGroup() {
-		promptCtx.GroupInfo = a.buildGroupContext(ref)
-		promptCtx.StyleHints = a.buildStyleHintContext(ctx, ref)
+		promptCtx.GroupInfo = a.buildGroupContext(sess)
+		promptCtx.StyleHints = a.buildStyleHintContext(ctx, sess)
 	} else if ref.IsPrivate() {
-		promptCtx.PeerInfo = a.buildPrivatePeerContext(ref)
+		promptCtx.PeerInfo = a.buildPrivatePeerContext(sess)
 	}
 
 	// 获取最近在场的人
 	recentPeople := ""
 	if ref.IsGroup() {
-		recentPeople = a.buildRecentPeopleContext(ref)
+		recentPeople = a.buildRecentPeopleContext(sess)
 	}
 
 	// 构建消息
@@ -1110,8 +1093,8 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool)
 	}
 }
 
-func (a *Agent) buildLoopContext(ref memory.ConversationRef) string {
-	msgs := a.getBuffer(ref)
+func (a *Agent) buildLoopContext(sess *session.Session[*onebot.Message]) string {
+	msgs := sess.Messages()
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -1159,7 +1142,8 @@ func humanizeElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d小时%d分钟", h, m)
 }
 
-func (a *Agent) buildGroupContext(ref memory.ConversationRef) string {
+func (a *Agent) buildGroupContext(sess *session.Session[*onebot.Message]) string {
+	ref := sess.Ref
 	if a.bot == nil || !ref.IsGroup() {
 		return ""
 	}
@@ -1190,12 +1174,13 @@ func (a *Agent) buildGroupContext(ref memory.ConversationRef) string {
 	return strings.Join(parts, "\n")
 }
 
-func (a *Agent) buildPrivatePeerContext(ref memory.ConversationRef) string {
+func (a *Agent) buildPrivatePeerContext(sess *session.Session[*onebot.Message]) string {
+	ref := sess.Ref
 	if !ref.IsPrivate() {
 		return ""
 	}
 
-	msgs := a.getBuffer(ref)
+	msgs := sess.Messages()
 	nickname := ""
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].UserID == ref.UserID && msgs[i].Nickname != "" {
@@ -1246,12 +1231,13 @@ func (a *Agent) buildPrivatePeerContext(ref memory.ConversationRef) string {
 	return strings.Join(details, "\n")
 }
 
-func (a *Agent) resolveMoodTargetUserID(ref memory.ConversationRef) int64 {
+func (a *Agent) resolveMoodTargetUserID(sess *session.Session[*onebot.Message]) int64 {
+	ref := sess.Ref
 	if ref.IsPrivate() {
 		return ref.UserID
 	}
 
-	msgs := a.getBuffer(ref)
+	msgs := sess.Messages()
 	selfID := a.bot.GetSelfID()
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].UserID != 0 && msgs[i].UserID != selfID {
@@ -1261,8 +1247,9 @@ func (a *Agent) resolveMoodTargetUserID(ref memory.ConversationRef) int64 {
 	return 0
 }
 
-func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationRef) ([]memory.Memory, []memory.Memory) {
-	msgs := a.getBuffer(ref)
+func (a *Agent) buildMemoryContext(ctx context.Context, sess *session.Session[*onebot.Message]) ([]memory.Memory, []memory.Memory) {
+	ref := sess.Ref
+	msgs := sess.Messages()
 	if len(msgs) == 0 {
 		return nil, nil
 	}
@@ -1291,7 +1278,7 @@ func (a *Agent) buildMemoryContext(ctx context.Context, ref memory.ConversationR
 		return local, nil
 	}
 
-	cross, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, conversation.AllConversationRef(), memory.MemoryTypeSelfExperience, 4, threshold)
+	cross, err := a.memory.SearchSimilarMemoriesByConversation(ctx, query, session.AllConversationRef(), memory.MemoryTypeSelfExperience, 4, threshold)
 	if err != nil {
 		zap.L().Warn("跨会话自我经历检索失败", zap.String("source", string(ref.Source)), zap.String("id", ref.ID()), zap.Error(err))
 		return local, nil
@@ -1359,11 +1346,12 @@ func sortedMessages(msgs []*onebot.Message) []*onebot.Message {
 	return cloned
 }
 
-func (a *Agent) buildStyleHintContext(ctx context.Context, ref memory.ConversationRef) []string {
+func (a *Agent) buildStyleHintContext(ctx context.Context, sess *session.Session[*onebot.Message]) []string {
+	ref := sess.Ref
 	if !ref.IsGroup() {
 		return nil
 	}
-	classification, err := a.classifyStyleContext(ctx, ref)
+	classification, err := a.classifyStyleContext(ctx, sess)
 	if err != nil || classification == nil {
 		if err != nil {
 			zap.L().Debug("群风格分类失败", zap.Int64("group_id", ref.GroupID), zap.Error(err))
@@ -1392,11 +1380,12 @@ func (a *Agent) buildStyleHintContext(ctx context.Context, ref memory.Conversati
 	return hints
 }
 
-func (a *Agent) classifyStyleContext(ctx context.Context, ref memory.ConversationRef) (*tools.StyleClassification, error) {
+func (a *Agent) classifyStyleContext(ctx context.Context, sess *session.Session[*onebot.Message]) (*tools.StyleClassification, error) {
+	ref := sess.Ref
 	if !ref.IsGroup() {
 		return nil, fmt.Errorf("私聊不需要群风格分类")
 	}
-	contextText := collectTextContext(a.getBuffer(ref))
+	contextText := collectTextContext(sess.Messages())
 	if contextText == "" {
 		return nil, fmt.Errorf("没有可分类的文字消息")
 	}
@@ -1478,8 +1467,8 @@ func formatStyleHint(card memory.StyleCard) string {
 }
 
 // buildChatContext 构建聊天上下文
-func (a *Agent) buildChatContext(ref memory.ConversationRef, lastProcessedTime time.Time) string {
-	msgs := sortedMessages(a.getBuffer(ref))
+func (a *Agent) buildChatContext(sess *session.Session[*onebot.Message], lastProcessedTime time.Time) string {
+	msgs := sortedMessages(sess.Messages())
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -1495,8 +1484,8 @@ func (a *Agent) buildChatContext(ref memory.ConversationRef, lastProcessedTime t
 }
 
 // buildRecentPeopleContext 获取最近在场的人
-func (a *Agent) buildRecentPeopleContext(ref memory.ConversationRef) string {
-	msgs := a.getBuffer(ref)
+func (a *Agent) buildRecentPeopleContext(sess *session.Session[*onebot.Message]) string {
+	msgs := sess.Messages()
 	if len(msgs) == 0 {
 		return ""
 	}

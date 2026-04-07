@@ -3,8 +3,8 @@ package persona
 import (
 	"fmt"
 	"mumu-bot/internal/config"
-	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/memory"
+	"mumu-bot/internal/session"
 	"strings"
 	"time"
 
@@ -22,7 +22,7 @@ type MoodInfo struct {
 
 // PromptContext 动态 prompt 上下文
 type PromptContext struct {
-	Ref                   conversation.Ref
+	Ref                   session.Ref
 	MoodState             *MoodInfo         // 当前情绪状态
 	JargonMatches         map[string]string // 匹配到的黑话/梗
 	GroupInfo             string
@@ -43,8 +43,8 @@ func NewPersona(cfg *config.PersonaConfig) *Persona {
 }
 
 // GetSystemPrompt 获取系统提示词（按会话类型分发）
-func (p *Persona) GetSystemPrompt(ref conversation.Ref) string {
-	if ref.Source == conversation.MessageSourcePrivate {
+func (p *Persona) GetSystemPrompt(ref session.Ref) string {
+	if ref.Source == session.MessageSourcePrivate {
 		return p.getPrivateSystemPrompt()
 	}
 	return p.getGroupSystemPrompt()
@@ -103,7 +103,7 @@ func (p *Persona) getPrivateSystemPrompt() string {
 
 // GetThinkPrompt 获取思考提示词（包含动态上下文）
 func (p *Persona) GetThinkPrompt(ctx *PromptContext, chatContext string, groupExtra string, recentPeople string) string {
-	if ctx != nil && ctx.Ref.Source == conversation.MessageSourcePrivate {
+	if ctx != nil && ctx.Ref.Source == session.MessageSourcePrivate {
 		return p.getPrivateThinkPrompt(ctx, chatContext, groupExtra)
 	}
 	return p.getGroupThinkPrompt(ctx, chatContext, groupExtra, recentPeople)

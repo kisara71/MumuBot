@@ -92,6 +92,10 @@ func sendStickerFunc(ctx context.Context, input *SendStickerInput) (*SendSticker
 	if input.StickerID == 0 {
 		return &SendStickerOutput{Success: false, Message: "表情包 ID 不能为空"}, nil
 	}
+	ref := tc.SessionRef()
+	if ref.ID() == "" {
+		return &SendStickerOutput{Success: false, Message: "会话未初始化"}, nil
+	}
 
 	// 获取表情包信息
 	sticker, err := tc.MemoryMgr.GetStickerByID(input.StickerID)
@@ -116,7 +120,7 @@ func sendStickerFunc(ctx context.Context, input *SendStickerInput) (*SendSticker
 	}
 
 	// 发送表情包（使用回调以记录消息）
-	msgID, err := tc.SendStickerCallback(ctx, tc.ConversationRef, filePath, sticker.Description)
+	msgID, err := tc.SendStickerCallback(ctx, ref, filePath, sticker.Description)
 	if err != nil {
 		return &SendStickerOutput{Success: false, Message: err.Error()}, nil
 	}
