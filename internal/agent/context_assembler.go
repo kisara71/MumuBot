@@ -340,16 +340,7 @@ func assemblerSortedMessages(msgs []*onebot.Message) []*onebot.Message {
 	}
 	cloned := append([]*onebot.Message(nil), msgs...)
 	sort.SliceStable(cloned, func(i, j int) bool {
-		if cloned[i] == nil || cloned[j] == nil {
-			return i < j
-		}
-		if cloned[i].MessageID > 0 && cloned[j].MessageID > 0 && cloned[i].MessageID != cloned[j].MessageID {
-			return cloned[i].MessageID < cloned[j].MessageID
-		}
-		if !cloned[i].Time.Equal(cloned[j].Time) {
-			return cloned[i].Time.Before(cloned[j].Time)
-		}
-		return i < j
+		return cloned[i].Time.Before(cloned[j].Time)
 	})
 	return cloned
 }
