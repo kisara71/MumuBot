@@ -137,8 +137,12 @@ func searchJargonFunc(ctx context.Context, input *SearchJargonInput) (*SearchJar
 	if limit <= 0 {
 		limit = 10
 	}
+	ref := tc.SessionRef()
+	if ref.ID() == "" {
+		return &SearchJargonOutput{Success: false, Message: "会话未初始化"}, nil
+	}
 
-	jargons, err := tc.MemoryMgr.SearchJargonsByConversation(tc.ConversationRef, input.Keyword, limit)
+	jargons, err := tc.MemoryMgr.SearchJargonsByConversation(ref, input.Keyword, limit)
 	if err != nil {
 		return &SearchJargonOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -151,7 +155,7 @@ func searchJargonFunc(ctx context.Context, input *SearchJargonInput) (*SearchJar
 			"meaning":            j.Meaning,
 			"context":            j.Context,
 			"checked":            j.Checked,
-			"from_current_group": j.GroupID == tc.ConversationRef.GroupID,
+			"from_current_group": j.GroupID == ref.GroupID,
 		})
 	}
 

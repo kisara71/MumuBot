@@ -49,6 +49,7 @@ func updateMoodFunc(ctx context.Context, input *UpdateMoodInput) (*UpdateMoodOut
 	if tc.MemoryMgr == nil {
 		return &UpdateMoodOutput{Success: false, Message: "记忆管理器未初始化"}, nil
 	}
+	ref := tc.SessionRef()
 
 	// 限制单次变化量，防止极端变化
 	valenceDelta := mutils.ClampFloat64(input.ValenceDelta, -0.5, 0.5)
@@ -59,7 +60,7 @@ func updateMoodFunc(ctx context.Context, input *UpdateMoodInput) (*UpdateMoodOut
 
 	targetUserID := input.UserID
 	if targetUserID == 0 {
-		targetUserID = tc.ConversationRef.UserID
+		targetUserID = ref.UserID
 	}
 	if targetUserID == 0 {
 		return &UpdateMoodOutput{Success: false, Message: "当前上下文没有明确的目标用户，请传 user_id"}, nil

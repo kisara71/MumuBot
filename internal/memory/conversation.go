@@ -1,22 +1,22 @@
 package memory
 
 import (
-	"mumu-bot/internal/conversation"
+	"mumu-bot/internal/session"
 
 	"gorm.io/gorm"
 )
 
-type ConversationScopeFields struct {
+type SessionScopeFields struct {
 	GroupField   string
 	PrivateField string
 }
 
-var conversationFields = ConversationScopeFields{
+var sessionFields = SessionScopeFields{
 	GroupField:   "group_id",
 	PrivateField: "user_id",
 }
 
-func scopeConversation(ref conversation.Ref, q *gorm.DB, fields ConversationScopeFields) *gorm.DB {
+func scopeSession(ref session.Ref, q *gorm.DB, fields SessionScopeFields) *gorm.DB {
 	switch {
 	case ref.IsGroup():
 		return q.Where(fields.GroupField+" = ?", ref.GroupID)
@@ -27,7 +27,7 @@ func scopeConversation(ref conversation.Ref, q *gorm.DB, fields ConversationScop
 	}
 }
 
-func scopeMessageLogs(ref conversation.Ref, q *gorm.DB) *gorm.DB {
+func scopeMessageLogs(ref session.Ref, q *gorm.DB) *gorm.DB {
 	if id := ref.ID(); id != "" {
 		return q.Where("conversation_id = ?", id)
 	}

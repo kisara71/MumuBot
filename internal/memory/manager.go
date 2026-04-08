@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"mumu-bot/internal/config"
-	"mumu-bot/internal/conversation"
+	"mumu-bot/internal/session"
 	"mumu-bot/internal/utils"
 	"mumu-bot/internal/vector"
 	"strings"
@@ -197,6 +197,21 @@ func (m *Manager) GetMessageCountByTime(ref ConversationRef, userID int64, start
 	return count, err
 }
 
+// IsFirstPrivateConversation 判断当前私聊是否处于首次对话阶段。
+// 由于 onMessage 会先落库再进入 think，这里以当前会话消息总数 <= 1 视为首次。
+func (m *Manager) IsFirstPrivateConversation(ref ConversationRef) (bool, error) {
+	if !ref.IsPrivate() || ref.ID() == "" {
+		return false, nil
+	}
+
+	var count int64
+	err := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count <= 1, nil
+}
+
 // ==================== 长期记忆 ====================
 // TODO 私聊长期记忆
 
@@ -294,7 +309,7 @@ func (m *Manager) QueryMemoryByConversation(ctx context.Context, query string, r
 
 	// 回退到关键词搜索
 	var memories []Memory
-	q := scopeConversation(ref, m.db.Model(&Memory{}), conversationFields)
+	q := scopeSession(ref, m.db.Model(&Memory{}), sessionFields)
 	if memType != "" {
 		q = q.Where("type = ?", memType)
 	}
@@ -382,7 +397,7 @@ func (m *Manager) cleanupMessageLogs(keepLatest int) {
 	}
 
 	for _, scope := range scopes {
-		ref, ok := conversation.ParseRefID(scope.ConversationID)
+		ref, ok := session.ParseRefID(scope.ConversationID)
 		if !ok {
 			continue
 		}
@@ -759,10 +774,10 @@ func mergeStyleCardSourceExcerpt(existing, candidate string) string {
 
 // ==================== 黑话管理 ====================
 
-// SearchJargons 搜索黑话（通过关键词匹配，本群优先）
+// SearchJargonsByConversation SearchJargons 搜索黑话（通过关键词匹配，本群优先）
 func (m *Manager) SearchJargonsByConversation(ref ConversationRef, keyword string, limit int) ([]Jargon, error) {
 	var jargons []Jargon
-	q := scopeConversation(ref, m.db.Model(&Jargon{}).Where("rejected = ?", false), conversationFields)
+	q := scopeSession(ref, m.db.Model(&Jargon{}).Where("rejected = ?", false), sessionFields)
 
 	// 使用 strings.Fields 切割关键词，挨个模糊匹配
 	if keyword != "" {
@@ -790,7 +805,7 @@ func (m *Manager) SearchJargonsByConversation(ref ConversationRef, keyword strin
 // SaveJargon 保存黑话/术语
 func (m *Manager) SaveJargon(jargon *Jargon) error {
 	var existing Jargon
-	q := scopeConversation(conversationRefFromJargon(jargon), m.db.Model(&Jargon{}), conversationFields).Where("content = ?", jargon.Content)
+	q := scopeSession(conversationRefFromJargon(jargon), m.db.Model(&Jargon{}), sessionFields).Where("content = ?", jargon.Content)
 	err := q.First(&existing).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -837,10 +852,10 @@ func (m *Manager) BatchReviewJargon(ids []uint, approve bool) error {
 	return m.db.Model(&Jargon{}).Where("id IN ?", ids).Updates(updates).Error
 }
 
-// GetUncheckedJargons 获取待审核的黑话
+// GetUncheckedJargonsByConversation GetUncheckedJargons 获取待审核的黑话
 func (m *Manager) GetUncheckedJargonsByConversation(ref ConversationRef, limit int) ([]Jargon, error) {
 	var jargons []Jargon
-	err := scopeConversation(ref, m.db.Model(&Jargon{}), conversationFields).
+	err := scopeSession(ref, m.db.Model(&Jargon{}), sessionFields).
 		Where("checked = ?", false).
 		Limit(limit).
 		Find(&jargons).Error
@@ -936,7 +951,7 @@ func (m *Manager) ListMemoriesByConversation(ref ConversationRef, memType string
 	var items []Memory
 	var total int64
 
-	q := scopeConversation(ref, m.db.Model(&Memory{}), conversationFields)
+	q := scopeSession(ref, m.db.Model(&Memory{}), sessionFields)
 	if memType != "" {
 		q = q.Where("type = ?", memType)
 	}

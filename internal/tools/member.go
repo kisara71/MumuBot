@@ -41,6 +41,8 @@ func mergeAndDeduplicateStrings(existing []string, newItems []string) []string {
 type UpdateUserProfileInput struct {
 	// UserID 群友的QQ号
 	UserID int64 `json:"user_id" jsonschema:"description=群友/私聊对象的QQ号"`
+	// Alias 对对方的称呼/别名
+	Alias []string `json:"alias,omitempty" jsonschema:"description=你对对方的称呼、外号或约定别名（只传新增项）"`
 	// SpeakStyle 说话风格描述
 	SpeakStyle string `json:"speak_style,omitempty" jsonschema:"description=说话风格描述（覆盖之前的描述）"`
 	// Interests 兴趣爱好列表
@@ -81,6 +83,17 @@ func updateMemberProfileFunc(ctx context.Context, input *UpdateUserProfileInput)
 
 	if input.SpeakStyle != "" {
 		profile.SpeakStyle = input.SpeakStyle
+	}
+	if len(input.Alias) > 0 {
+		var existingAlias []string
+		if profile.Alias != "" {
+			if err := sonic.UnmarshalString(profile.Alias, &existingAlias); err != nil {
+				existingAlias = []string{}
+			}
+		}
+		mergedAlias := mergeAndDeduplicateStrings(existingAlias, input.Alias)
+		b, _ := sonic.MarshalString(mergedAlias)
+		profile.Alias = b
 	}
 	if len(input.Interests) > 0 {
 		// 解析已有的兴趣爱好
@@ -144,6 +157,7 @@ type GetUserInfoOutput struct {
 	Success     bool     `json:"success"`
 	Message     string   `json:"message,omitempty"`
 	Nickname    string   `json:"nickname,omitempty"`
+	Alias       []string `json:"alias,omitempty"`
 	SpeakStyle  string   `json:"speak_style,omitempty"`
 	Interests   []string `json:"interests,omitempty"`
 	CommonWords []string `json:"common_words,omitempty"`
@@ -174,7 +188,12 @@ func getMemberInfoFunc(ctx context.Context, input *GetUserInfoInput) (*GetUserIn
 		}, nil
 	}
 
-	var interests, commonWords []string
+	var aliases, interests, commonWords []string
+	if profile.Alias != "" {
+		if err := sonic.UnmarshalString(profile.Alias, &aliases); err != nil {
+			zap.L().Warn("反序列化 alias 失败", zap.Error(err))
+		}
+	}
 	if profile.Interests != "" {
 		if err := sonic.UnmarshalString(profile.Interests, &interests); err != nil {
 			zap.L().Warn("反序列化 interests 失败", zap.Error(err))
@@ -189,6 +208,7 @@ func getMemberInfoFunc(ctx context.Context, input *GetUserInfoInput) (*GetUserIn
 	return &GetUserInfoOutput{
 		Success:     true,
 		Nickname:    profile.Nickname,
+		Alias:       aliases,
 		SpeakStyle:  profile.SpeakStyle,
 		Interests:   interests,
 		CommonWords: commonWords,

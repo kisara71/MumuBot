@@ -1,4 +1,4 @@
-package conversation
+package session
 
 import "fmt"
 

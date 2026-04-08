@@ -1,13 +1,13 @@
 package onebot
 
-import "mumu-bot/internal/conversation"
+import "mumu-bot/internal/session"
 
-type MessageSource = conversation.MessageSource
+type MessageSource = session.MessageSource
 
 const (
-	MessageSourceUnknown = conversation.MessageSourceUnknown
-	MessageSourceGroup   = conversation.MessageSourceGroup
-	MessageSourcePrivate = conversation.MessageSourcePrivate
+	MessageSourceUnknown = session.MessageSourceUnknown
+	MessageSourceGroup   = session.MessageSourceGroup
+	MessageSourcePrivate = session.MessageSourcePrivate
 )
 
 type NoticeEventType string

@@ -154,7 +154,7 @@ func (c *MilvusClient) Insert(ctx context.Context, memoryID uint, refID string, 
 
 	// 准备数据
 	memoryIDCol := column.NewColumnInt64("memory_id", []int64{int64(memoryID)})
-	refIDCol := column.NewColumnString("conversation_id", []string{refID})
+	refIDCol := column.NewColumnVarChar("conversation_id", []string{refID})
 	memTypeCol := column.NewColumnVarChar("mem_type", []string{memType})
 	embeddingCol := column.NewColumnFloatVector("embedding", c.cfg.VectorDim, [][]float32{emb32})
 

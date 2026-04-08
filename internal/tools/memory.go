@@ -3,9 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
-	"mumu-bot/internal/conversation"
 	"mumu-bot/internal/llm"
 	"mumu-bot/internal/memory"
+	"mumu-bot/internal/session"
 	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -44,6 +44,10 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 	if input.Content == "" {
 		return &SaveMemoryOutput{Success: false, Message: "内容不能为空"}, nil
 	}
+	ref := tc.SessionRef()
+	if ref.ID() == "" {
+		return &SaveMemoryOutput{Success: false, Message: "会话未初始化"}, nil
+	}
 
 	// 验证记忆类型
 	validTypes := map[string]bool{
@@ -58,10 +62,10 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 
 	// 向量相似度搜索
 	targetType := memory.MemoryType(input.Type)
-	if targetType == memory.MemoryTypeUserFact && !tc.ConversationRef.IsPrivate() {
+	if targetType == memory.MemoryTypeUserFact && !ref.IsPrivate() {
 		return &SaveMemoryOutput{Success: false, Message: "user_fact 仅允许在私聊中保存"}, nil
 	}
-	similarMems, err := tc.MemoryMgr.SearchSimilarMemoriesByConversation(ctx, input.Content, tc.ConversationRef, targetType, 30, 0.85)
+	similarMems, err := tc.MemoryMgr.SearchSimilarMemoriesByConversation(ctx, input.Content, ref, targetType, 30, 0.85)
 	if err == nil && len(similarMems) > 0 {
 		// 调用辅助模型进行合并
 		auxModel, err := llm.NewAuxClient()
@@ -112,12 +116,12 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 	}
 
 	// 如果没有相似记忆或合并失败，直接保存新记忆
-	groupID := tc.ConversationRef.GroupID
+	groupID := ref.GroupID
 	userID := input.RelatedUserID
-	if tc.ConversationRef.IsPrivate() {
+	if ref.IsPrivate() {
 		groupID = 0
 		if userID == 0 {
-			userID = tc.ConversationRef.UserID
+			userID = ref.UserID
 		}
 	}
 	mem := &memory.Memory{
@@ -191,9 +195,9 @@ func queryMemoryFunc(ctx context.Context, input *QueryMemoryInput) (*QueryMemory
 		limit = 50
 	}
 
-	ref := conversation.AllConversationRef()
+	ref := session.AllConversationRef()
 	if input.Scoped {
-		ref = tc.ConversationRef
+		ref = tc.SessionRef()
 	}
 
 	memories, err := tc.MemoryMgr.QueryMemoryByConversation(ctx, input.Query, ref, memory.MemoryType(input.Type), limit)
