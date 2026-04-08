@@ -491,8 +491,7 @@ func (a *ContextAssembler) assembleChatContext(sess *session.Session[*onebot.Mes
 		if !lastProcessedTime.IsZero() && m.Time.Before(lastProcessedTime) {
 			b.WriteString("(OLD)")
 		}
-		content := m.Content
-		b.WriteString(renderPromptMessageLine(m, content, peerDisplayName))
+		b.WriteString(renderPromptMessageLine(m, m.FinalContent, peerDisplayName))
 	}
 	return b.String()
 }
