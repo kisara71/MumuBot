@@ -197,6 +197,21 @@ func (m *Manager) GetMessageCountByTime(ref ConversationRef, userID int64, start
 	return count, err
 }
 
+// IsFirstPrivateConversation 判断当前私聊是否处于首次对话阶段。
+// 由于 onMessage 会先落库再进入 think，这里以当前会话消息总数 <= 1 视为首次。
+func (m *Manager) IsFirstPrivateConversation(ref ConversationRef) (bool, error) {
+	if !ref.IsPrivate() || ref.ID() == "" {
+		return false, nil
+	}
+
+	var count int64
+	err := scopeMessageLogs(ref, m.db.Model(&MessageLog{})).Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count <= 1, nil
+}
+
 // ==================== 长期记忆 ====================
 // TODO 私聊长期记忆
 
@@ -759,7 +774,7 @@ func mergeStyleCardSourceExcerpt(existing, candidate string) string {
 
 // ==================== 黑话管理 ====================
 
-// SearchJargons 搜索黑话（通过关键词匹配，本群优先）
+// SearchJargonsByConversation SearchJargons 搜索黑话（通过关键词匹配，本群优先）
 func (m *Manager) SearchJargonsByConversation(ref ConversationRef, keyword string, limit int) ([]Jargon, error) {
 	var jargons []Jargon
 	q := scopeSession(ref, m.db.Model(&Jargon{}).Where("rejected = ?", false), sessionFields)
@@ -837,7 +852,7 @@ func (m *Manager) BatchReviewJargon(ids []uint, approve bool) error {
 	return m.db.Model(&Jargon{}).Where("id IN ?", ids).Updates(updates).Error
 }
 
-// GetUncheckedJargons 获取待审核的黑话
+// GetUncheckedJargonsByConversation GetUncheckedJargons 获取待审核的黑话
 func (m *Manager) GetUncheckedJargonsByConversation(ref ConversationRef, limit int) ([]Jargon, error) {
 	var jargons []Jargon
 	err := scopeSession(ref, m.db.Model(&Jargon{}), sessionFields).

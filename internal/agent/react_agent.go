@@ -492,7 +492,7 @@ func (a *Agent) parseMessageContent(msg *onebot.Message) string {
 
 	// 处理图片（调用 Vision 模型识别）
 	for _, img := range msg.Images {
-		if img.SubType == 1 {
+		if img.SubType == 0 {
 			// 表情包类型
 			var desc string
 			if a.vision != nil && img.URL != "" {
@@ -997,11 +997,12 @@ func (a *Agent) think(ref memory.ConversationRef, isMention bool, fromLoop bool)
 	}
 	systemPrompt := a.promptBuilder.BuildSystemPrompt(ref)
 	thinkPrompt := a.promptBuilder.BuildThinkPrompt(prompt.BuildInput{
-		Context:      assembled.PromptContext,
-		ChatContext:  assembled.ChatContext,
-		ExtraPrompt:  assembled.ExtraPrompt,
-		RecentPeople: assembled.RecentPeople,
-		IsMention:    isMention,
+		Context:        assembled.PromptContext,
+		IsFirstPrivate: assembled.IsFirstPrivate,
+		ChatContext:    assembled.ChatContext,
+		ExtraPrompt:    assembled.ExtraPrompt,
+		RecentPeople:   assembled.RecentPeople,
+		IsMention:      isMention,
 	})
 
 	// 调试：显示系统提示词

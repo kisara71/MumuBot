@@ -2,7 +2,10 @@ package memory
 
 import (
 	"mumu-bot/internal/session"
+	"strings"
 	"time"
+
+	"github.com/bytedance/sonic"
 )
 
 type ConversationRef = session.Ref
@@ -53,7 +56,8 @@ type UserProfile struct {
 	UpdatedAt time.Time `json:"updated_at"`
 
 	UserID      int64     `gorm:"uniqueIndex::idx_user" json:"user_id"`
-	Nickname    string    `gorm:"type:varchar(100)" json:"nickname"`
+	Nickname    string    `gorm:"type:varchar(100)" json:"nickname"` //	qq 昵称
+	Alias       string    `gorm:"type:text" json:"alias"`            // bot与user约定/bot主动起的名字(JSON array)
 	SpeakStyle  string    `gorm:"type:text" json:"speak_style"`
 	Interests   string    `gorm:"type:text" json:"interests"`
 	CommonWords string    `gorm:"type:text" json:"common_words"`
@@ -67,6 +71,48 @@ type UserProfile struct {
 }
 
 func (UserProfile) TableName() string { return "member_profiles" }
+
+func (p *UserProfile) AliasList() []string {
+	if p == nil || strings.TrimSpace(p.Alias) == "" {
+		return nil
+	}
+
+	var aliases []string
+	if err := sonic.UnmarshalString(p.Alias, &aliases); err != nil {
+		return nil
+	}
+
+	result := make([]string, 0, len(aliases))
+	seen := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		if _, ok := seen[alias]; ok {
+			continue
+		}
+		seen[alias] = struct{}{}
+		result = append(result, alias)
+	}
+	return result
+}
+
+func (p *UserProfile) PreferredName(fallback string) string {
+	if p != nil {
+		if aliases := p.AliasList(); len(aliases) > 0 {
+			return aliases[0]
+		}
+		if name := strings.TrimSpace(p.Nickname); name != "" {
+			return name
+		}
+	}
+	fallback = strings.TrimSpace(fallback)
+	if fallback != "" {
+		return fallback
+	}
+	return ""
+}
 
 type StyleIntent string
 

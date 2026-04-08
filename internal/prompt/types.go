@@ -26,9 +26,10 @@ type Context struct {
 }
 
 type BuildInput struct {
-	Context      *Context
-	ChatContext  string
-	ExtraPrompt  string
-	RecentPeople string
-	IsMention    bool
+	Context        *Context
+	IsFirstPrivate bool
+	ChatContext    string
+	ExtraPrompt    string
+	RecentPeople   string
+	IsMention      bool
 }

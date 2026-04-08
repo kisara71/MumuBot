@@ -17,8 +17,9 @@ func (b *Builder) groupThinkPrompt(input BuildInput) string {
 		out.WriteString(fmt.Sprintf("\n补充说明：\n%s\n", input.ExtraPrompt))
 	}
 
-	out.WriteString(fmt.Sprintf("\n对话：\n以“你(...)”开头的是你自己说的话，其他是群友发言；带“(OLD)”的是旧消息，仅供参考。\n%s\n", input.ChatContext))
+	out.WriteString(fmt.Sprintf("\n对话：\n“你(...)”是你自己；“(OLD)”表示旧消息。\n%s\n", input.ChatContext))
 	out.WriteString(sharedConversationNotice)
+	out.WriteString(sharedToolOutputRule)
 	b.writeSharedContextBlocks(&out, ctx)
 
 	if ctx != nil && len(ctx.StyleHints) > 0 {
@@ -49,12 +50,18 @@ func (b *Builder) privateThinkPrompt(input BuildInput) string {
 	if input.ExtraPrompt != "" {
 		out.WriteString(fmt.Sprintf("\n补充说明：\n%s\n", input.ExtraPrompt))
 	}
+	if input.IsFirstPrivate {
+		out.WriteString("\n首次私聊提示：\n")
+		out.WriteString(firstPrivatePrompt)
+		out.WriteString("\n")
+	}
 	if ctx != nil && ctx.LoopInfo != "" {
 		out.WriteString(fmt.Sprintf("\n主动触发信息：\n%s\n", ctx.LoopInfo))
 	}
 
-	out.WriteString(fmt.Sprintf("\n对话：\n以“你(...)”开头的是你自己说的话，以“对方(...)”开头的是对方说的话；带“(OLD)”的是旧消息，仅供参考。\n%s\n", input.ChatContext))
+	out.WriteString(fmt.Sprintf("\n对话：\n“你(...)”是你自己；“对方(...)”是对方；“(OLD)”表示旧消息。\n%s\n", input.ChatContext))
 	out.WriteString(sharedConversationNotice)
+	out.WriteString(sharedToolOutputRule)
 	b.writeSharedContextBlocks(&out, ctx)
 	out.WriteString(privateThinkEnding)
 	return out.String()

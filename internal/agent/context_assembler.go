@@ -10,6 +10,7 @@ import (
 	"mumu-bot/internal/prompt"
 	"mumu-bot/internal/session"
 	"mumu-bot/internal/tools"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -23,11 +24,17 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	stickerDescPattern = regexp.MustCompile(`\[表情包:([^\]]+)\]`)
+	messageLinePattern = regexp.MustCompile(`^\[(\d{2}:\d{2}:\d{2})\] #(-?\d+) (.*?):(.*)\n?$`)
+)
+
 type AssembledContext struct {
-	PromptContext *prompt.Context
-	ChatContext   string
-	RecentPeople  string
-	ExtraPrompt   string
+	PromptContext  *prompt.Context
+	IsFirstPrivate bool
+	ChatContext    string
+	RecentPeople   string
+	ExtraPrompt    string
 }
 
 type ContextAssembler struct {
@@ -53,7 +60,7 @@ func (a *ContextAssembler) Assemble(ctx context.Context, sess *session.Session[*
 		return nil
 	}
 	ref := sess.Ref
-	chatContext := assembleChatContext(sess, lastProcessedTime)
+	chatContext := a.assembleChatContext(sess, lastProcessedTime)
 	if chatContext == "" {
 		return nil
 	}
@@ -88,6 +95,11 @@ func (a *ContextAssembler) Assemble(ctx context.Context, sess *session.Session[*
 		result.PromptContext.StyleHints = a.buildStyleHintContext(ctx, sess)
 		result.RecentPeople = a.buildRecentPeopleContext(sess)
 	} else if ref.IsPrivate() {
+		if isFirst, err := a.memory.IsFirstPrivateConversation(ref); err == nil {
+			result.IsFirstPrivate = isFirst
+		} else {
+			zap.L().Debug("判断首次私聊失败", zap.String("id", ref.ID()), zap.Error(err))
+		}
 		result.PromptContext.PeerInfo = a.buildPrivatePeerContext(sess)
 	}
 	return result
@@ -211,10 +223,7 @@ func (a *ContextAssembler) buildPrivatePeerContext(sess *session.Session[*onebot
 		return fmt.Sprintf("- 对方: %s\n- 当前场景: 这是你和对方的一对一私聊", nickname)
 	}
 
-	displayName := profile.Nickname
-	if displayName == "" {
-		displayName = nickname
-	}
+	displayName := profile.PreferredName(nickname)
 	if displayName == "" {
 		displayName = fmt.Sprintf("%d", ref.UserID)
 	}
@@ -240,6 +249,9 @@ func (a *ContextAssembler) buildPrivatePeerContext(sess *session.Session[*onebot
 	}
 	if interests != "" {
 		details = append(details, "- 兴趣: "+interests)
+	}
+	if aliases := profile.AliasList(); len(aliases) > 1 {
+		details = append(details, "- 其他称呼: "+strings.Join(aliases[1:], "、"))
 	}
 	return strings.Join(details, "\n")
 }
@@ -461,10 +473,17 @@ func assemblerFormatStyleHint(card memory.StyleCard) string {
 	return hint + "，可参考群里人说过的原话：" + strings.Join(sourceItems, " / ")
 }
 
-func assembleChatContext(sess *session.Session[*onebot.Message], lastProcessedTime time.Time) string {
+func (a *ContextAssembler) assembleChatContext(sess *session.Session[*onebot.Message], lastProcessedTime time.Time) string {
 	msgs := assemblerSortedMessages(sess.Messages())
 	if len(msgs) == 0 {
 		return ""
+	}
+
+	peerDisplayName := ""
+	if ref := sess.Ref; ref.IsPrivate() && a.memory != nil {
+		if profile, err := a.memory.GetMemberProfile(ref.UserID); err == nil && profile != nil {
+			peerDisplayName = profile.PreferredName("")
+		}
 	}
 
 	var b strings.Builder
@@ -472,9 +491,39 @@ func assembleChatContext(sess *session.Session[*onebot.Message], lastProcessedTi
 		if !lastProcessedTime.IsZero() && m.Time.Before(lastProcessedTime) {
 			b.WriteString("(OLD)")
 		}
-		b.WriteString(m.FinalContent)
+		content := m.Content
+		b.WriteString(renderPromptMessageLine(m, content, peerDisplayName))
 	}
 	return b.String()
+}
+
+func renderPromptMessageLine(msg *onebot.Message, rendered string, peerDisplayName string) string {
+	if msg == nil || rendered == "" {
+		return rendered
+	}
+
+	matches := messageLinePattern.FindStringSubmatch(rendered)
+	if len(matches) != 5 {
+		return rendered
+	}
+
+	body := strings.TrimLeft(matches[4], " ")
+	speaker := promptSpeakerName(msg, matches[3], peerDisplayName)
+	return fmt.Sprintf("[%s] #%d %s: %s\n", matches[1], msg.MessageID, speaker, body)
+}
+
+func promptSpeakerName(msg *onebot.Message, originalSpeaker string, peerDisplayName string) string {
+	if msg == nil {
+		return originalSpeaker
+	}
+	originalSpeaker = strings.TrimSpace(originalSpeaker)
+	if msg.MessageSource == onebot.MessageSourcePrivate &&
+		strings.HasPrefix(originalSpeaker, "对方(") &&
+		strings.TrimSpace(peerDisplayName) != "" &&
+		msg.UserID != 0 {
+		return fmt.Sprintf("对方(%s,%d)", peerDisplayName, msg.UserID)
+	}
+	return originalSpeaker
 }
 
 func (a *ContextAssembler) buildRecentPeopleContext(sess *session.Session[*onebot.Message]) string {
@@ -523,10 +572,7 @@ func (a *ContextAssembler) buildRecentPeopleContext(sess *session.Session[*onebo
 			continue
 		}
 
-		displayName := profile.Nickname
-		if displayName == "" {
-			displayName = nickname
-		}
+		displayName := profile.PreferredName(nickname)
 		if displayName == "" {
 			displayName = fmt.Sprintf("%d", userID)
 		}
