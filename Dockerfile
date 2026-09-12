@@ -9,7 +9,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/mumu-bot .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/luma .
 
 FROM alpine:3.22
 
@@ -17,11 +17,11 @@ WORKDIR /app
 
 RUN apk add --no-cache ca-certificates tzdata
 
-COPY --from=builder /out/mumu-bot /app/mumu-bot
+COPY --from=builder /out/luma /app/luma
 COPY --from=builder /app/config /app/config
 
 RUN mkdir -p /app/stickers
 
 EXPOSE 8080
 
-ENTRYPOINT ["/app/mumu-bot"]
+ENTRYPOINT ["/app/luma"]

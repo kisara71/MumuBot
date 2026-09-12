@@ -1,16 +1,43 @@
 services:
+  luma:
+    build: .
+    container_name: luma
+    environment:
+      TZ: Asia/Shanghai
+      LUMA_LLM_API_KEY: ${LUMA_LLM_API_KEY}
+      LUMA_EMBEDDING_API_KEY: ${LUMA_EMBEDDING_API_KEY:-}
+      LUMA_VISION_API_KEY: ${LUMA_VISION_API_KEY:-}
+      LUMA_ONEBOT_TOKEN: ${LUMA_ONEBOT_TOKEN:-}
+      LUMA_MYSQL_PASSWORD: ${LUMA_MYSQL_PASSWORD}
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - ./config/mcp.json:/app/config/mcp.json:ro
+      - sticker_data:/app/stickers
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${LUMA_HTTP_PORT:-8080}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
   mysql:
     image: mysql:8.4
-    container_name: mumu-mysql
+    container_name: luma-mysql
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     environment:
       TZ: Asia/Shanghai
-      MYSQL_DATABASE: mumu_bot
-      MYSQL_ROOT_PASSWORD: ${MUMU_MYSQL_PASSWORD:-mumu_local_pwd}
-    ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      MYSQL_DATABASE: luma
+      MYSQL_ROOT_PASSWORD: ${LUMA_MYSQL_PASSWORD}
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -23,7 +50,8 @@ services:
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
-    container_name: mumu-etcd
+    container_name: luma-etcd
+    profiles: ["vector"]
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
       ETCD_AUTO_COMPACTION_RETENTION: "1000"
@@ -40,21 +68,20 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2025-02-28T09-55-16Z
-    container_name: mumu-minio
+    container_name: luma-minio
+    profiles: ["vector"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     command: minio server /minio_data
-    ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/minio_data
     restart: unless-stopped
 
   milvus:
     image: milvusdb/milvus:v2.5.10
-    container_name: mumu-milvus
+    container_name: luma-milvus
+    profiles: ["vector"]
     command:
       - milvus
       - run
@@ -63,9 +90,6 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
       TZ: Asia/Shanghai
-    ports:
-      - "${MILVUS_PORT:-19530}:19530"
-      - "${MILVUS_HTTP_PORT:-9091}:9091"
     volumes:
       - milvus_data:/var/lib/milvus
     depends_on:
@@ -74,6 +98,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  sticker_data:
   mysql_data:
   etcd_data:
   minio_data:

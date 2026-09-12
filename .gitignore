@@ -1,55 +1,44 @@
-# 二进制文件
-amu
-amu.exe
+# Binaries
+luma
+luma.exe
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# 测试
+# Tests and build output
 *.test
-
-# 输出
 *.out
-
-# 依赖
 vendor/
 
-# IDE
+# Editors and operating systems
 .idea/
 .trae/
 .vscode/
 *.swp
 *.swo
 *~
-
-# 系统文件
 .DS_Store
 Thumbs.db
 
-# 配置（敏感信息）
+# Local configuration and secrets
 config/config.local.yaml
 config/*.local.yaml
+config.yaml
+mcp.json
+.env
+.env.local
+napcat_onebot_11_http_api.json
+onebot-11-master/
 
-# 数据目录
+# Runtime data
 data/
 stickers/
 *.db
 *.db-journal
-
-# 日志
 *.log
 logs/
 
-# 环境变量
-.env
-.env.local
-
-config.yaml
-napcat_onebot_11_http_api.json
-onebot-11-master/
-
-mcp.json
-
+# Local notes
 TODO_LIST.md

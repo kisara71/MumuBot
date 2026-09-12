@@ -1,15 +1,14 @@
 package session
 
 import (
-	"mumu-bot/internal/utils"
+	"github.com/kisara71/luma/internal/utils"
 	"sync"
 	"time"
 )
 
 type pendingThink struct {
 	timer      *time.Timer
-	isMention  bool
-	fromLoop   bool
+	proactive  bool
 	generation uint64
 }
 
@@ -17,11 +16,10 @@ type Session[T any] struct {
 	Ref    Ref
 	Buffer *utils.RingBuffer[T]
 
-	mu                sync.RWMutex
-	pending           *pendingThink
-	processing        bool
-	lastProcessedTime time.Time
-	lastLoopThinkTime time.Time
+	mu              sync.RWMutex
+	pending         *pendingThink
+	processing      bool
+	nextProactiveAt time.Time
 }
 
 func NewSession[T any](ref Ref, capacity int) *Session[T] {
@@ -49,7 +47,7 @@ func (s *Session[T]) IsEmpty() bool {
 	return s == nil || s.Buffer == nil || s.Buffer.IsEmpty()
 }
 
-func (s *Session[T]) SchedulePending(debounce time.Duration, isMention bool, fromLoop bool, onFlush func(generation uint64)) {
+func (s *Session[T]) SchedulePending(debounce time.Duration, proactive bool, onFlush func(generation uint64)) {
 	if s == nil {
 		return
 	}
@@ -58,8 +56,9 @@ func (s *Session[T]) SchedulePending(debounce time.Duration, isMention bool, fro
 	defer s.mu.Unlock()
 
 	if s.pending != nil {
-		s.pending.isMention = s.pending.isMention || isMention
-		s.pending.fromLoop = s.pending.fromLoop || fromLoop
+		// A real incoming message takes precedence over a scheduled reflection
+		// when both land in the debounce window.
+		s.pending.proactive = s.pending.proactive && proactive
 		s.pending.generation++
 		if s.pending.timer != nil {
 			s.pending.timer.Stop()
@@ -72,8 +71,7 @@ func (s *Session[T]) SchedulePending(debounce time.Duration, isMention bool, fro
 	}
 
 	pending := &pendingThink{
-		isMention:  isMention,
-		fromLoop:   fromLoop,
+		proactive:  proactive,
 		generation: 1,
 	}
 	gen := pending.generation
@@ -83,22 +81,21 @@ func (s *Session[T]) SchedulePending(debounce time.Duration, isMention bool, fro
 	s.pending = pending
 }
 
-func (s *Session[T]) ConsumePending(generation uint64) (isMention bool, fromLoop bool, ok bool) {
+func (s *Session[T]) ConsumePending(generation uint64) (proactive bool, ok bool) {
 	if s == nil {
-		return false, false, false
+		return false, false
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.pending == nil || s.pending.generation != generation {
-		return false, false, false
+		return false, false
 	}
 
-	isMention = s.pending.isMention
-	fromLoop = s.pending.fromLoop
+	proactive = s.pending.proactive
 	s.pending = nil
-	return isMention, fromLoop, true
+	return proactive, true
 }
 
 func (s *Session[T]) ClearPending() {
@@ -115,26 +112,20 @@ func (s *Session[T]) ClearPending() {
 	s.pending = nil
 }
 
-func (s *Session[T]) TryBeginProcessing(fromLoop bool) (lastProcessedTime time.Time, ok bool) {
+func (s *Session[T]) TryBeginProcessing() bool {
 	if s == nil {
-		return time.Time{}, false
+		return false
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.processing {
-		return time.Time{}, false
+		return false
 	}
 
 	s.processing = true
-	lastProcessedTime = s.lastProcessedTime
-	if fromLoop {
-		s.lastLoopThinkTime = time.Now()
-	} else {
-		s.lastProcessedTime = time.Now()
-	}
-	return lastProcessedTime, true
+	return true
 }
 
 func (s *Session[T]) FinishProcessing() {
@@ -147,12 +138,32 @@ func (s *Session[T]) FinishProcessing() {
 	s.processing = false
 }
 
-func (s *Session[T]) LastLoopThinkTime() time.Time {
-	if s == nil {
-		return time.Time{}
+func (s *Session[T]) ScheduleProactive(at time.Time) {
+	if s == nil || at.IsZero() {
+		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.nextProactiveAt.IsZero() {
+		return
+	}
+	s.nextProactiveAt = at
+}
 
+func (s *Session[T]) ProactiveDue(now time.Time) bool {
+	if s == nil {
+		return false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.lastLoopThinkTime
+	return !s.processing && !s.nextProactiveAt.IsZero() && !now.Before(s.nextProactiveAt)
+}
+
+func (s *Session[T]) ClearProactivePlan() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextProactiveAt = time.Time{}
 }

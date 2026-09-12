@@ -2,18 +2,10 @@ package prompt
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/6tail/lunar-go/calendar"
 )
-
-func (b *Builder) writeSharedThinkPrefix(out *strings.Builder, ctx *Context) {
-	out.WriteString("时间：" + currentTimeContext() + "\n")
-	if ctx != nil && ctx.MoodState != nil {
-		out.WriteString(formatMoodPrompt(ctx.MoodState))
-	}
-}
 
 func currentTimeContext() string {
 	now := time.Now()

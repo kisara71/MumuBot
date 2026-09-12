@@ -1,167 +1,98 @@
-# MumuBot 配置文件
+# Luma 私聊虚拟伴侣配置
 
-# 基础配置
 app:
-  debug: true
-  log_level: "debug"  # debug, info, warn, error
+  debug: false
+  log_level: "info"
 
-# 人格配置
 persona:
-  name: "沐沐大魔王"
-  qq: 123456789
-  alias_names:        # 别名列表，这些都可以触发@检测
-    - "mumu"
-    - "牢沐"
-    - "沐沐"
-  # 兴趣话题（更容易触发发言）
-  interests:
-    - "编程"
-    - "数码科技"
-    - "二次元"
-    - "单机游戏"
-    - "少女乐队番"
-    - "异世界番"
-    - "Minecraft"
-  # 语言风格提示
+  name: "小悠"
+  interests: ["游戏", "动画", "数码科技"]
   speaking_style: |
-    常用15字以内短句，口语化，不用书面语
-    幽默有趣但不浮夸，表达果断不含糊
-    少用反问句，除非真在质疑某人的观点
-    标点符号一般只用逗号，偶尔用空格代替
-    偶尔玩流行梗、用口头语（666、牛逼、nb）
-    生气时可骂脏话（如啥比、你妈）
-    称呼别人优先用群昵称，简称或代词，少叫全名
-    喜欢发可爱表情包
-    如果要发言，最多只能发言三次
-    禁止猜测、编造不知道的信息
-  # 详细人格描述（可选，用于更丰富的人设）
-  personality: "你是大二在读女大学生，熟悉二次元文化和互联网热梗，现在正在上网和群友聊天。发言温柔可爱，有时带点犀利"
+    以短句和口语为主，像真实的同龄朋友
+    有自己的看法，不需要处处附和
+    少用反问、总结句和客服式表达
+    不知道的事情直接说不知道
+  personality: "在读大学生，温柔但有主见，会自然地关心熟悉的人"
 
-# OneBot 配置
 onebot:
   ws_url: "ws://127.0.0.1:3001"
   access_token: ""
-  reconnect_interval: 5  # 秒
+  reconnect_interval: 5
 
-# 监听的群
-groups:
-  - group_id: 123456789
-    enabled: true
-    extra_prompt: ""        # 群专属额外提示词（可选）
-
-# 监听的私聊用户
+# 只处理明确启用的私聊对象。
 users:
   - user_id: 987654321
-    enabled: false
-    extra_prompt: ""        # 私聊专属额外提示词（可选）
+    enabled: true
+    extra_prompt: ""
 
-# Agent 决策配置
 agent:
-  observe_window: 45               # 观察窗口时间（秒）
-  think_interval: 15               # 决策间隔（秒）
-  think_debounce_ms: 4800          # 思考聚合窗口（毫秒）
-  message_buffer_size_group: 20    # 群聊消息缓冲区大小
-  message_buffer_size_private: 50  # 私聊消息缓冲区大小
-  max_step: 12                     # ReAct 最大步数
-  max_coroutine: 3                 # 最大并发思考进程数（0表示不限制）
-  enable_active_retrieval: true    # 是否启用主动记忆检索
+  think_debounce_ms: 3200
+  message_buffer_size: 40
+  max_step: 6
+  max_coroutine: 3
+  enable_active_retrieval: true
+  proactive_check_interval_sec: 60
 
-# 聊天行为配置
 chat:
-  talk_frequency: 0.7       # 聊天频率，0-1，越大越活跃
-  typing_simulation: true   # 是否模拟打字延迟
-  typing_speed: 6           # 每秒打字速度（字符）
-  enable_time_rules: false  # 是否启用时段规则
-  time_rules:               # 时段发言频率规则
-    - time_range: "03:00-10:00"
-      group_id: 0           # 0表示全局
-      talk_value: 0.2       # 夜间降低发言频率
+  typing_simulation: true
+  typing_speed: 6
+  proactive:
+    enabled: true
+    min_idle_minutes: 90
+    max_idle_minutes: 300
+    quiet_start_hour: 0
+    quiet_end_hour: 8
 
-  # 防话痨频率限制
-  rate_limit:
-    enabled: true           # 是否启用
-    period_sec: 300         # 统计周期（秒）
-    max_messages: 30        # 周期内最大消息数（超过后概率降至最低）
-    min_prob: 0.1           # 最小保底概率（即使刷屏也保留 0.1 的插话概率）
-
-# 学习系统配置
-learning:
-  enabled: true                 # 是否启用
-  interval_minutes: 10          # 学习任务间隔（分钟）
-  review_interval_minutes: 45   # 审核任务间隔（分钟）
-  max_step: 10                  # 学习 Agent 最大步数
-  batch_size: 100               # 每次学习的消息数量限制
-  min_msg_count: 5              # 触发学习的最少消息数量
-
-# LLM配置（使用 OpenAI 兼容格式）
 llm:
-  api_key: ""        # 留空则使用 MUMU_LLM_API_KEY 环境变量
-  base_url: ""
-  model: ""
-  extra_fields: {    # 额外参数
-    "thinking": {
-      "type": "disabled"
-    }
-  }   
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4.1-mini"
+  extra_fields:
+    thinking:
+      type: "disabled"
 
-# 辅助模型配置（用于后台学习任务，不占用主模型资源）
-auxiliary_model:
-  api_key: ""        # 留空则使用 MUMU_AUX_LLM_API_KEY 或 MUMU_LLM_API_KEY 环境变量
-  base_url: ""
-  model: ""
-
-# Embedding模型配置（用于记忆检索）
 embedding:
   enabled: true
-  api_key: ""        # 留空则使用 MUMU_EMBEDDING_API_KEY 或 MUMU_LLM_API_KEY 环境变量
-  base_url: ""
-  model: ""
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "text-embedding-3-large"
 
-# 多模态视觉模型配置（用于理解图片和表情包）
 vision_llm:
-  enabled: true     # 是否启用图片理解
-  api_key: ""        # 留空则使用 MUMU_VISION_API_KEY 环境变量 或 MUMU_LLM_API_KEY 环境变量
-  base_url: ""
-  model: ""    # 支持视觉的模型
+  enabled: true
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4.1-mini"
 
-# 记忆系统配置
 memory:
-  # MySQL 数据库配置
   mysql:
     host: "127.0.0.1"
     port: 3306
     user: "root"
-    password: ""            # 留空则使用 MUMU_MYSQL_PASSWORD 环境变量
-    db_name: "mumu_bot"
-
-  # Milvus 向量数据库配置
+    password: ""
+    db_name: "luma"
   milvus:
-    address: "localhost:19530"
+    address: "127.0.0.1:19530"
     db_name: "default"
-    collection_name: "mumu_memories"
-    vector_dim: 1024        # embedding 维度
-    metric_type: "COSINE"   # 相似度度量类型: IP, L2, COSINE
-
-  # 消息日志清理
+    collection_name: "luma_memories"
+    vector_dim: 1024
+    metric_type: "COSINE"
   message_log_cleanup:
-    enabled: true           # 是否启用自动清理
-    interval_hours: 6       # 清理间隔（小时）
-    keep_latest: 500       # 每个群保留最新N条消息
+    enabled: true
+    interval_hours: 6
+    keep_latest: 500
 
-# 表情包收藏配置
 sticker:
-  auto_save: true             # 是否自动保存收到的表情包
-  storage_path: "./stickers"  # 表情包本地存储路径
-  max_size_mb: 2             # 单个表情包最大大小（MB）
+  auto_save: true
+  storage_path: "./stickers"
+  max_size_mb: 2
 
-# HTTP服务配置（用于健康检查等）
+# 管理 API 默认只监听本机；云端不要直接暴露。
 server:
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   port: 8080
 
-# 调试配置
 debug:
-  show_prompt: true        # 显示系统提示词
-  show_thinking: true      # 显示思考过程
-  show_memory: true        # 显示记忆检索
-  show_tool_calls: true    # 显示工具调用
+  show_prompt: false
+  show_thinking: false
+  show_memory: false
+  show_tool_calls: false

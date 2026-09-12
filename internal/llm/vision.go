@@ -3,7 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
-	"mumu-bot/internal/config"
+	"github.com/kisara71/luma/internal/config"
 	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"

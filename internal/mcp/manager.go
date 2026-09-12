@@ -9,6 +9,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/mark3labs/mcp-go/client"
+	mcptransport "github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
@@ -19,7 +20,7 @@ import (
 type ServerConfig struct {
 	Name          string            `json:"name"`
 	Enabled       bool              `json:"enabled"`
-	Type          string            `json:"type"`           // sse 或 stdio
+	Type          string            `json:"type"`           // stdio、streamable_http 或旧版 sse
 	URL           string            `json:"url"`            // SSE 服务器 URL
 	Command       string            `json:"command"`        // stdio 命令
 	Args          []string          `json:"args"`           // stdio 参数
@@ -94,6 +95,8 @@ func (m *Manager) LoadFromConfig(ctx context.Context, configPath string) error {
 func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 	var cli *client.Client
 	var err error
+	env := expandValues(cfg.Env)
+	headers := expandMapValues(cfg.CustomHeaders)
 
 	switch cfg.Type {
 	case "sse":
@@ -102,9 +105,14 @@ func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 			return fmt.Errorf("创建 SSE 客户端失败: %w", err)
 		}
 	case "stdio":
-		cli, err = client.NewStdioMCPClient(cfg.Command, cfg.Env, cfg.Args...)
+		cli, err = client.NewStdioMCPClient(cfg.Command, env, cfg.Args...)
 		if err != nil {
 			return fmt.Errorf("创建 Stdio 客户端失败: %w", err)
+		}
+	case "streamable_http":
+		cli, err = client.NewStreamableHttpClient(cfg.URL, mcptransport.WithHTTPHeaders(headers))
+		if err != nil {
+			return fmt.Errorf("创建 Streamable HTTP 客户端失败: %w", err)
 		}
 	default:
 		return fmt.Errorf("不支持的 MCP 服务器类型: %s", cfg.Type)
@@ -119,7 +127,7 @@ func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 	initRequest := mcp.InitializeRequest{}
 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "mumu-bot",
+		Name:    "luma",
 		Version: "2.0.0",
 	}
 
@@ -132,7 +140,7 @@ func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 	mcpToolCfg := &mcptool.Config{
 		Cli:           cli,
 		ToolNameList:  cfg.ToolNameList,
-		CustomHeaders: cfg.CustomHeaders,
+		CustomHeaders: headers,
 	}
 
 	baseTools, err := mcptool.GetTools(ctx, mcpToolCfg)
@@ -149,6 +157,22 @@ func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 		zap.Int("tool_count", len(baseTools)))
 
 	return nil
+}
+
+func expandValues(values []string) []string {
+	result := make([]string, len(values))
+	for i, value := range values {
+		result[i] = os.ExpandEnv(value)
+	}
+	return result
+}
+
+func expandMapValues(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = os.ExpandEnv(value)
+	}
+	return result
 }
 
 // GetTools 获取所有MCP工具

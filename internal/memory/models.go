@@ -1,46 +1,29 @@
 package memory
 
 import (
-	"mumu-bot/internal/session"
 	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
 )
 
-type ConversationRef = session.Ref
-
-func AllConversationRef() ConversationRef {
-	return session.AllConversationRef()
-}
-
-func GroupConversationRef(groupID int64) ConversationRef {
-	return session.GroupConversationRef(groupID)
-}
-
-func PrivateConversationRef(userID int64) ConversationRef {
-	return session.PrivateConversationRef(userID)
-}
-
 // MemoryType 记忆类型
 type MemoryType string
 
 const (
-	MemoryTypeGroupFact      MemoryType = "group_fact"      // 群长期事实（群规、群风格、重要事件等）
 	MemoryTypeUserFact       MemoryType = "user_fact"       // 某个用户的稳定事实，尤其适合私聊沉淀
 	MemoryTypeSelfExperience MemoryType = "self_experience" // 自身经历（参与的事、被提及、感受等）
 	MemoryTypeConversation   MemoryType = "conversation"    // 对话中的重要信息或阶段性上下文
+	MemoryTypeExpression     MemoryType = "expression"      // 这个用户特有的词、梗、缩写及使用语境
 )
 
-// Memory 长期记忆
-// TODO
+// Memory 是绑定到单个私聊对象的长期记忆。
 type Memory struct {
 	ID             uint       `gorm:"primarykey" json:"id"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 	ConversationID string     `gorm:"type:varchar(32);index" json:"conversation_id"`
 	Type           MemoryType `gorm:"type:varchar(50);index" json:"type"`
-	GroupID        int64      `gorm:"index" json:"group_id"`
 	UserID         int64      `gorm:"index" json:"user_id,omitempty"`
 	Content        string     `gorm:"type:text" json:"content"`
 	Importance     float64    `gorm:"default:0.5" json:"importance"`
@@ -55,7 +38,7 @@ type UserProfile struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	UserID      int64     `gorm:"uniqueIndex::idx_user" json:"user_id"`
+	UserID      int64     `gorm:"uniqueIndex:idx_user" json:"user_id"`
 	Nickname    string    `gorm:"type:varchar(100)" json:"nickname"` //	qq 昵称
 	Alias       string    `gorm:"type:text" json:"alias"`            // bot与user约定/bot主动起的名字(JSON array)
 	SpeakStyle  string    `gorm:"type:text" json:"speak_style"`
@@ -70,7 +53,7 @@ type UserProfile struct {
 	MsgCount    int       `gorm:"default:0" json:"msg_count"`
 }
 
-func (UserProfile) TableName() string { return "member_profiles" }
+func (UserProfile) TableName() string { return "user_profiles" }
 
 func (p *UserProfile) AliasList() []string {
 	if p == nil || strings.TrimSpace(p.Alias) == "" {
@@ -114,128 +97,17 @@ func (p *UserProfile) PreferredName(fallback string) string {
 	return ""
 }
 
-type StyleIntent string
-
-const (
-	StyleIntentLightBanter StyleIntent = "轻松起哄"
-	StyleIntentAgreement   StyleIntent = "认同接话"
-	StyleIntentQuestioning StyleIntent = "询问推进"
-	StyleIntentCalming     StyleIntent = "安抚缓和"
-)
-
-var styleIntentSet = map[StyleIntent]struct{}{
-	StyleIntentLightBanter: {},
-	StyleIntentAgreement:   {},
-	StyleIntentQuestioning: {},
-	StyleIntentCalming:     {},
-}
-
-func IsValidStyleIntent(v string) bool {
-	_, ok := styleIntentSet[StyleIntent(v)]
-	return ok
-}
-
-func StyleIntentValues() []string {
-	return []string{
-		string(StyleIntentLightBanter),
-		string(StyleIntentAgreement),
-		string(StyleIntentQuestioning),
-		string(StyleIntentCalming),
-	}
-}
-
-type StyleTone string
-
-const (
-	StyleToneDirect     StyleTone = "直接"
-	StyleToneLight      StyleTone = "轻松"
-	StyleToneExaggerate StyleTone = "夸张"
-	StyleToneRestrained StyleTone = "克制"
-)
-
-var styleToneSet = map[StyleTone]struct{}{
-	StyleToneDirect:     {},
-	StyleToneLight:      {},
-	StyleToneExaggerate: {},
-	StyleToneRestrained: {},
-}
-
-func IsValidStyleTone(v string) bool {
-	_, ok := styleToneSet[StyleTone(v)]
-	return ok
-}
-
-func StyleToneValues() []string {
-	return []string{
-		string(StyleToneDirect),
-		string(StyleToneLight),
-		string(StyleToneExaggerate),
-		string(StyleToneRestrained),
-	}
-}
-
-type StyleCardStatus string
-
-const (
-	StyleCardStatusCandidate StyleCardStatus = "candidate"
-	StyleCardStatusActive    StyleCardStatus = "active"
-	StyleCardStatusRejected  StyleCardStatus = "rejected"
-)
-
-// StyleCard 群风格卡片
-type StyleCard struct {
-	ID             uint            `gorm:"primarykey" json:"id"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	ConversationID string          `gorm:"type:varchar(32);index" json:"conversation_id"`
-	GroupID        int64           `gorm:"index" json:"group_id"`
-	Intent         string          `gorm:"type:varchar(32);index" json:"intent"`
-	Tone           string          `gorm:"type:varchar(32);index" json:"tone"`
-	TriggerRule    string          `gorm:"type:varchar(255)" json:"trigger_rule"`
-	AvoidRule      string          `gorm:"type:varchar(255)" json:"avoid_rule"`
-	Example        string          `gorm:"type:varchar(255)" json:"example"`
-	SourceExcerpt  string          `gorm:"type:text" json:"source_excerpt"`
-	Status         StyleCardStatus `gorm:"type:varchar(20);index;default:'candidate'" json:"status"`
-	EvidenceCount  int             `gorm:"default:1" json:"evidence_count"`
-	UseCount       int             `gorm:"default:0" json:"use_count"`
-	LastUsedAt     *time.Time      `json:"last_used_at,omitempty"`
-}
-
-var styleCardTableName = "style_cards"
-
-func (StyleCard) TableName() string { return styleCardTableName }
-
-// Jargon 黑话/术语
-type Jargon struct {
-	ID        uint      `gorm:"primarykey" json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-
-	GroupID  int64  `gorm:"index" json:"group_id"`
-	UserID   int64  `gorm:"index" json:"user_id"`
-	Content  string `gorm:"type:varchar(100);index" json:"content"`
-	Meaning  string `gorm:"type:text" json:"meaning"`
-	Context  string `gorm:"type:text" json:"context"`
-	Checked  bool   `gorm:"default:false" json:"checked"`
-	Rejected bool   `gorm:"default:false" json:"rejected"`
-}
-
-func (Jargon) TableName() string { return "jargons" }
-
 // MessageLog 消息日志
 type MessageLog struct {
 	ID              uint      `gorm:"primarykey" json:"id"`
 	CreatedAt       time.Time `gorm:"index" json:"created_at"`
 	MessageID       string    `gorm:"type:varchar(100);uniqueIndex" json:"message_id"`
 	ConversationID  string    `gorm:"type:varchar(32);index" json:"conversation_id"`
-	GroupID         int64     `gorm:"index" json:"group_id"`
 	UserID          int64     `gorm:"index" json:"user_id"`
 	Nickname        string    `gorm:"type:varchar(100)" json:"nickname"`
 	Content         string    `gorm:"type:text" json:"content"`
 	OriginalContent string    `gorm:"type:text" json:"original_content,omitempty"` // 原始消息内容
-	MessageSource   string    `gorm:"type:varchar(50);index" json:"message_source"`
-	IsMentioned     bool      `gorm:"default:false" json:"is_mentioned"`
-	Forwards        string    `gorm:"type:text" json:"forwards,omitempty"` // 合并转发内容的 JSON
+	Forwards        string    `gorm:"type:text" json:"forwards,omitempty"`         // 合并转发内容的 JSON
 }
 
 func (MessageLog) TableName() string { return "message_logs" }
@@ -272,14 +144,3 @@ type MoodState struct {
 }
 
 func (MoodState) TableName() string { return "mood_state" }
-
-// LearningState 学习状态记录
-type LearningState struct {
-	ID        uint      `gorm:"primarykey" json:"id"`
-	UpdatedAt time.Time `json:"updated_at"`
-
-	GroupID       int64 `gorm:"uniqueIndex" json:"group_id"`
-	LastMessageID uint  `json:"last_message_id"` // 上次学习到的最后一条消息ID (数据库自增ID)
-}
-
-func (LearningState) TableName() string { return "learning_states" }

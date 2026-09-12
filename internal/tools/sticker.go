@@ -2,7 +2,7 @@ package tools
 
 import (
 	"context"
-	"mumu-bot/internal/config"
+	"github.com/kisara71/luma/internal/config"
 	"os"
 	"path/filepath"
 
@@ -117,6 +117,9 @@ func sendStickerFunc(ctx context.Context, input *SendStickerInput) (*SendSticker
 	// 检查文件是否存在
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return &SendStickerOutput{Success: false, Message: "表情包文件不存在"}, nil
+	}
+	if !tc.ReserveTerminalAction() {
+		return &SendStickerOutput{Success: false, Message: "本轮已经完成"}, nil
 	}
 
 	// 发送表情包（使用回调以记录消息）

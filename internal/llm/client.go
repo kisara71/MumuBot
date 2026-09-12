@@ -3,7 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
-	"mumu-bot/internal/config"
+	"github.com/kisara71/luma/internal/config"
 	"sync"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
@@ -14,10 +14,6 @@ var (
 	defaultClient     model.ToolCallingChatModel
 	defaultClientErr  error
 	defaultClientOnce sync.Once
-
-	auxClient     model.ToolCallingChatModel
-	auxClientErr  error
-	auxClientOnce sync.Once
 )
 
 // NewClient 创建 LLM 客户端（单例）
@@ -42,27 +38,4 @@ func NewClient() (model.ToolCallingChatModel, error) {
 	})
 
 	return defaultClient, defaultClientErr
-}
-
-// NewAuxClient 创建辅助 LLM 客户端（单例）
-func NewAuxClient() (model.ToolCallingChatModel, error) {
-	auxClientOnce.Do(func() {
-		cfg := config.Get()
-		ctx := context.Background()
-
-		// 使用 AuxiliaryModel 配置
-		chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-			BaseURL: cfg.AuxiliaryModel.BaseURL,
-			APIKey:  cfg.AuxiliaryModel.APIKey,
-			Model:   cfg.AuxiliaryModel.Model,
-		})
-		if err != nil {
-			auxClientErr = fmt.Errorf("创建辅助 ChatModel 失败: %w", err)
-			return
-		}
-
-		auxClient = chatModel
-	})
-
-	return auxClient, auxClientErr
 }

@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 
-	mutils "mumu-bot/internal/utils"
+	mutils "github.com/kisara71/luma/internal/utils"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -13,8 +13,6 @@ import (
 
 // UpdateMoodInput 更新情绪的输入参数
 type UpdateMoodInput struct {
-	// UserID 要调整情绪状态的目标用户。私聊可留空默认当前对象，群聊建议明确填写。
-	UserID int64 `json:"user_id,omitempty" jsonschema:"description=目标用户QQ号。私聊可留空默认当前对象，群聊建议明确填写"`
 	// ValenceDelta 心情变化量，正数变好，负数变差
 	ValenceDelta float64 `json:"valence_delta" jsonschema:"description=心情变化量：正数心情变好，负数心情变差。范围-0.5~0.5"`
 	// EnergyDelta 精力变化量，正数更活跃，负数更疲惫
@@ -58,10 +56,8 @@ func updateMoodFunc(ctx context.Context, input *UpdateMoodInput) (*UpdateMoodOut
 	irritationDelta := mutils.ClampFloat64(input.IrritationDelta, -0.3, 0.3)
 	curiosityDelta := mutils.ClampFloat64(input.CuriosityDelta, -0.3, 0.3)
 
-	targetUserID := input.UserID
-	if targetUserID == 0 {
-		targetUserID = ref.UserID
-	}
+	// Private-only: mood is always scoped to the current relationship.
+	targetUserID := ref.UserID
 	if targetUserID == 0 {
 		return &UpdateMoodOutput{Success: false, Message: "当前上下文没有明确的目标用户，请传 user_id"}, nil
 	}
@@ -86,7 +82,7 @@ func updateMoodFunc(ctx context.Context, input *UpdateMoodInput) (*UpdateMoodOut
 func NewUpdateMoodTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"updateMood",
-		`调整你面对当前用户时的情绪状态。情绪会自然衰减回归平静，但你可以根据对话内容主动调整。
+		`调整你面对当前聊天对象时的情绪状态。情绪会自然衰减回归平静。
 
 【使用建议】
 - 不需要每次都调整，只有明确感受到情绪变化时才调用

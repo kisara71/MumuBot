@@ -3,8 +3,8 @@ package onebot
 import (
 	"context"
 	"fmt"
-	"mumu-bot/internal/config"
-	"mumu-bot/internal/session"
+	"github.com/kisara71/luma/internal/config"
+	"github.com/kisara71/luma/internal/session"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,28 +20,22 @@ import (
 type Client struct {
 	conn      *websocket.Conn
 	connMu    sync.Mutex
-	handlers  map[string][]EventHandler
-	selfID    int64
+	selfID    atomic.Int64
 	ctx       context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 
-	mutedMu    sync.RWMutex
-	mutedUntil map[int64]time.Time
-
 	// 消息回调
-	onMessage func(*Message)
+	onMessage   func(*Message)
+	onMessageMu sync.RWMutex
 
 	// 重连控制
-	reconnecting bool
+	reconnecting atomic.Bool
 
 	// API 调用响应等待
-	echoCounter uint64
+	echoCounter atomic.Uint64
 	pendingReqs sync.Map // map[string]chan *APIResponse
 }
-
-// EventHandler 事件处理器
-type EventHandler func(event map[string]interface{})
 
 // APIResponse OneBot API 响应
 type APIResponse struct {
@@ -63,35 +57,21 @@ func (r *APIResponse) DataMap() map[string]interface{} {
 	return nil
 }
 
-// DataList 获取响应数据为数组类型（用于列表 API）
-func (r *APIResponse) DataList() []interface{} {
-	if r.Data == nil {
-		return nil
-	}
-	if arr, ok := r.Data.([]interface{}); ok {
-		return arr
-	}
-	return nil
-}
-
-// Message 群消息
+// Message 私聊消息。
 type Message struct {
-	MessageID      int64                 `json:"message_id"`
-	ConversationID string                `json:"conversation_id,omitempty"`
-	GroupID        int64                 `json:"group_id"`
-	UserID         int64                 `json:"user_id"`
-	Nickname       string                `json:"nickname"`
-	Content        string                `json:"content"`                 // 纯文本内容
-	IsMentioned    bool                  `json:"is_mentioned"`            // 是否@机器人
-	Time           time.Time             `json:"time"`                    // 消息时间
-	MessageSource  session.MessageSource `json:"message_source"`          // 消息类型
-	Images         []ImageInfo           `json:"images,omitempty"`        // 图片列表
-	Videos         []VideoInfo           `json:"videos,omitempty"`        // 视频列表
-	Faces          []FaceInfo            `json:"faces,omitempty"`         // 表情列表
-	AtList         []int64               `json:"at_list,omitempty"`       // @的用户列表
-	Reply          *ReplyInfo            `json:"reply,omitempty"`         // 回复信息
-	Forwards       []ForwardMessage      `json:"forwards,omitempty"`      // 合并转发内容
-	FinalContent   string                `json:"final_content,omitempty"` // 处理后的最终内容
+	MessageID      int64            `json:"message_id"`
+	ConversationID string           `json:"conversation_id,omitempty"`
+	UserID         int64            `json:"user_id"`
+	Nickname       string           `json:"nickname"`
+	Content        string           `json:"content"`                 // 纯文本内容
+	Time           time.Time        `json:"time"`                    // 消息时间
+	Images         []ImageInfo      `json:"images,omitempty"`        // 图片列表
+	Videos         []VideoInfo      `json:"videos,omitempty"`        // 视频列表
+	Faces          []FaceInfo       `json:"faces,omitempty"`         // 表情列表
+	AtList         []int64          `json:"at_list,omitempty"`       // @的用户列表
+	Reply          *ReplyInfo       `json:"reply,omitempty"`         // 回复信息
+	Forwards       []ForwardMessage `json:"forwards,omitempty"`      // 合并转发内容
+	FinalContent   string           `json:"final_content,omitempty"` // 处理后的最终内容
 }
 
 // ImageInfo 图片信息
@@ -149,52 +129,6 @@ func (c *CardMessage) Format() string {
 	return fmt.Sprintf("[卡片:%s]", c.Title)
 }
 
-// EmojiReaction 表情回应
-type EmojiReaction struct {
-	EmojiID int `json:"emoji_id"`
-	Count   int `json:"count"`
-}
-
-// GroupNotice 群公告
-type GroupNotice struct {
-	NoticeID    string `json:"notice_id"`
-	SenderID    int64  `json:"sender_id"`
-	PublishTime int64  `json:"publish_time"`
-	Content     string `json:"content"`
-}
-
-// EssenceMessage 群精华消息
-type EssenceMessage struct {
-	MessageID    int64  `json:"message_id"`
-	SenderID     int64  `json:"sender_id"`
-	SenderNick   string `json:"sender_nick"`
-	OperatorID   int64  `json:"operator_id"`
-	OperatorNick string `json:"operator_nick"`
-	OperatorTime int64  `json:"operator_time"`
-	Content      string `json:"content"`
-}
-
-// GroupInfo 群信息
-type GroupInfo struct {
-	GroupID        int64  `json:"group_id"`
-	GroupName      string `json:"group_name"`
-	MemberCount    int    `json:"member_count"`
-	MaxMemberCount int    `json:"max_member_count"`
-}
-
-// GroupMemberInfo 群成员信息
-type GroupMemberInfo struct {
-	GroupID      int64  `json:"group_id"`
-	UserID       int64  `json:"user_id"`
-	Nickname     string `json:"nickname"`
-	Card         string `json:"card"`
-	Role         string `json:"role"` // owner/admin/member
-	JoinTime     int64  `json:"join_time"`
-	LastSentTime int64  `json:"last_sent_time"`
-	Level        string `json:"level"`
-	Title        string `json:"title"` // 专属头衔
-}
-
 // LoginInfo 登录信息
 type LoginInfo struct {
 	UserID   int64  `json:"user_id"`
@@ -205,10 +139,8 @@ type LoginInfo struct {
 func NewClient() *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
-		handlers:   make(map[string][]EventHandler),
-		ctx:        ctx,
-		cancel:     cancel,
-		mutedUntil: make(map[int64]time.Time),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 }
 
@@ -229,17 +161,17 @@ func (c *Client) Connect() error {
 	}
 
 	c.conn = conn
-	c.reconnecting = false
+	c.reconnecting.Store(false)
 
 	// 启动消息接收循环
-	go c.receiveLoop()
+	go c.receiveLoop(conn)
 
 	zap.L().Info("已连接到 OneBot", zap.String("url", cfg.OneBot.WsURL))
 	return nil
 }
 
 // receiveLoop 消息接收循环
-func (c *Client) receiveLoop() {
+func (c *Client) receiveLoop(conn *websocket.Conn) {
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -247,7 +179,7 @@ func (c *Client) receiveLoop() {
 		default:
 		}
 
-		_, message, err := c.conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			zap.L().Error("读取消息失败", zap.Error(err))
 			c.handleDisconnect()
@@ -279,10 +211,6 @@ func (c *Client) handleMessage(data []byte) {
 			c.handleMetaEvent(event)
 		case "message":
 			c.handleMessageEvent(event)
-		case "notice":
-			c.handleNoticeEvent(event)
-		case "request":
-			c.handleRequestEvent(event)
 		}
 	}
 }
@@ -302,7 +230,11 @@ func (c *Client) handleAPIResponse(event map[string]interface{}, echo string) {
 		if msg, ok := event["message"].(string); ok {
 			resp.Message = msg
 		}
-		ch.(chan *APIResponse) <- resp
+		select {
+		case ch.(chan *APIResponse) <- resp:
+		default:
+			zap.L().Debug("忽略重复或过期的 API 响应", zap.String("echo", echo))
+		}
 	}
 }
 
@@ -314,8 +246,8 @@ func (c *Client) handleMetaEvent(event map[string]interface{}) {
 		subType, _ := event["sub_type"].(string)
 		if subType == "connect" {
 			if selfID, ok := parseInt64(event["self_id"]); ok {
-				c.selfID = selfID
-				zap.L().Info("Bot 已上线", zap.Int64("qq", c.selfID))
+				c.selfID.Store(selfID)
+				zap.L().Info("Bot 已上线", zap.Int64("qq", c.selfID.Load()))
 			}
 		}
 	}
@@ -329,153 +261,33 @@ func (c *Client) handleMessageEvent(event map[string]interface{}) {
 		return
 	}
 
-	var msg *Message
-	switch session.MessageSource(msgSrc) {
-	case MessageSourceGroup:
-		msg = c.parseGroupMessage(event)
-	case MessageSourcePrivate:
-		msg = c.parseUserMessage(event)
-	default:
-		zap.L().Error("预期之外的信息来源:", zap.Any("msg_src", msgSrc))
+	if msgSrc != "private" {
+		// Luma deliberately ignores group events at the transport boundary.
 		return
 	}
+	msg := c.parseUserMessage(event)
 	// 解析消息
 	if msg == nil {
 		return
 	}
 
 	// 调用消息回调
-	if c.onMessage != nil {
-		c.onMessage(msg)
+	c.onMessageMu.RLock()
+	handler := c.onMessage
+	c.onMessageMu.RUnlock()
+	if handler != nil {
+		handler(msg)
 	}
 }
 
-// handleNoticeEvent 处理通知事件
-func (c *Client) handleNoticeEvent(event map[string]interface{}) {
-	noticeType, _ := event["notice_type"].(string)
-	subType, _ := event["sub_type"].(string)
-	zap.L().Debug("收到通知", zap.String("type", noticeType), zap.String("sub_type", subType))
-
-	switch NoticeEventType(noticeType) {
-	case NoticeEventTypeGroupBan:
-		c.handleGroupBanNotice(event, subType)
-	case NoticeEventTypeFriendAdd:
-		// TODO: implement me
-	}
-
-}
-
-func (c *Client) handleGroupBanNotice(event map[string]interface{}, subType string) {
-	groupID, ok := parseInt64(event["group_id"])
-	if !ok || groupID == 0 {
-		return
-	}
-
-	userID, ok := parseInt64(event["user_id"])
-	if !ok || userID != c.selfID {
-		return
-	}
-
-	if subType == "lift_ban" {
-		c.clearSelfMuted(groupID)
-		return
-	}
-
-	if subType != "ban" {
-		return
-	}
-
-	if durationSec, ok := parseInt64(event["duration"]); ok && durationSec > 0 {
-		c.setSelfMutedUntil(groupID, time.Now().Add(time.Duration(durationSec)*time.Second))
-		return
-	}
-
-	// 如果没有时长或为 0，视为未禁言
-	c.clearSelfMuted(groupID)
-}
-
-func (c *Client) setSelfMutedUntil(groupID int64, until time.Time) {
-	c.mutedMu.Lock()
-	c.mutedUntil[groupID] = until
-	c.mutedMu.Unlock()
-}
-
-func (c *Client) clearSelfMuted(groupID int64) {
-	c.mutedMu.Lock()
-	delete(c.mutedUntil, groupID)
-	c.mutedMu.Unlock()
-}
-
-// IsSelfMuted 判断当前群内机器人是否处于禁言状态
-func (c *Client) IsSelfMuted(groupID int64) bool {
-	c.mutedMu.RLock()
-	until, ok := c.mutedUntil[groupID]
-	c.mutedMu.RUnlock()
-	if !ok || until.IsZero() {
-		return false
-	}
-
-	if time.Now().After(until) {
-		c.clearSelfMuted(groupID)
-		return false
-	}
-
-	return true
-}
-
-// handleRequestEvent 处理请求事件（加群/加好友请求）
-func (c *Client) handleRequestEvent(event map[string]interface{}) {
-	requestType, _ := event["request_type"].(string)
-	zap.L().Debug("收到请求", zap.String("type", requestType))
-}
-
-// parseGroupMessage 解析群消息
-func (c *Client) parseGroupMessage(event map[string]interface{}) *Message {
-	msg := &Message{
-		MessageSource:  MessageSourceGroup,
-		ConversationID: "",
-	}
-	//	common message
-	c.parseCommonMessage(event, msg)
-	// 群ID
-	if groupID, ok := parseInt64(event["group_id"]); ok {
-		msg.GroupID = groupID
-		msg.ConversationID = session.GroupConversationRef(groupID).ID()
-	}
-
-	// 发送者信息
-	if sender, ok := event["sender"].(map[string]interface{}); ok {
-		if userID, ok := parseInt64(sender["user_id"]); ok {
-			msg.UserID = userID
-		}
-		if nickname, ok := sender["nickname"].(string); ok {
-			msg.Nickname = nickname
-		}
-	}
-
-	// 解析消息段，提取各类信息
-	c.parseMessageSegments(event, msg)
-
-	// 检查是否@机器人
-	for _, atID := range msg.AtList {
-		if atID == c.selfID {
-			msg.IsMentioned = true
-			break
-		}
-	}
-
-	return msg
-}
 func (c *Client) parseUserMessage(event map[string]interface{}) *Message {
-	msg := &Message{
-		MessageSource: MessageSourcePrivate,
-	}
+	msg := &Message{}
 	//	commmon message
 	c.parseCommonMessage(event, msg)
 
 	// 私聊会话对象
 	if userID, ok := parseInt64(event["user_id"]); ok && userID > 0 {
-		msg.ConversationID = session.PrivateConversationRef(userID).ID()
+		msg.ConversationID = session.NewRef(userID).ID()
 	}
 
 	// 发送者信息
@@ -702,65 +514,9 @@ func (c *Client) parseMessageSegments(event map[string]interface{}, msg *Message
 
 // OnMessage 设置消息回调
 func (c *Client) OnMessage(handler func(*Message)) {
+	c.onMessageMu.Lock()
+	defer c.onMessageMu.Unlock()
 	c.onMessage = handler
-}
-
-// SendGroupMessage 发送群消息
-func (c *Client) SendGroupMessage(ctx context.Context, groupID int64, content string, replyTo int64, mentions []int64) (int64, error) {
-	// 使用消息段数组格式，更符合 OneBot 11 标准
-	var message []map[string]interface{}
-
-	// reply 消息段
-	if replyTo > 0 {
-		message = append(message, map[string]interface{}{
-			"type": "reply",
-			"data": map[string]interface{}{
-				"id": strconv.FormatInt(replyTo, 10),
-			},
-		})
-	}
-
-	// @ 消息段
-	for _, uid := range mentions {
-		if uid <= 0 {
-			continue
-		}
-		message = append(message, map[string]interface{}{
-			"type": "at",
-			"data": map[string]interface{}{
-				"qq": strconv.FormatInt(uid, 10),
-			},
-		}, map[string]interface{}{
-			"type": "text",
-			"data": map[string]interface{}{
-				"text": " ",
-			},
-		})
-	}
-
-	// 文本消息段
-	if content != "" {
-		message = append(message, map[string]interface{}{
-			"type": "text",
-			"data": map[string]interface{}{
-				"text": content,
-			},
-		})
-	}
-
-	resp, err := c.callAPI(ctx, "send_group_msg", map[string]interface{}{
-		"group_id": groupID,
-		"message":  message,
-	})
-	if err != nil {
-		return 0, err
-	}
-	if data := resp.DataMap(); data != nil {
-		if msgID, ok := parseInt64(data["message_id"]); ok {
-			return msgID, nil
-		}
-	}
-	return 0, nil
 }
 
 // SendPrivateMessage 发送私聊消息
@@ -819,162 +575,11 @@ func (c *Client) GetLoginInfo(ctx context.Context) (*LoginInfo, error) {
 	return info, nil
 }
 
-// GetGroupInfo 获取群信息
-func (c *Client) GetGroupInfo(ctx context.Context, groupID int64, noCache bool) (*GroupInfo, error) {
-	resp, err := c.callAPI(ctx, "get_group_info", map[string]interface{}{
-		"group_id": groupID,
-		"no_cache": noCache,
-	})
-	if err != nil {
-		return nil, err
-	}
-	data := resp.DataMap()
-	if data == nil {
-		return nil, fmt.Errorf("无效的响应数据")
-	}
-	info := &GroupInfo{}
-	if gid, ok := parseInt64(data["group_id"]); ok {
-		info.GroupID = gid
-	}
-	if name, ok := data["group_name"].(string); ok {
-		info.GroupName = name
-	}
-	if count, ok := parseInt(data["member_count"]); ok {
-		info.MemberCount = count
-	}
-	if m, ok := parseInt(data["max_member_count"]); ok {
-		info.MaxMemberCount = m
-	}
-	return info, nil
-}
-
-// GetGroupMemberInfo 获取群成员信息
-func (c *Client) GetGroupMemberInfo(ctx context.Context, groupID, userID int64, noCache bool) (*GroupMemberInfo, error) {
-	resp, err := c.callAPI(ctx, "get_group_member_info", map[string]interface{}{
-		"group_id": groupID,
-		"user_id":  userID,
-		"no_cache": noCache,
-	})
-	if err != nil {
-		return nil, err
-	}
-	data := resp.DataMap()
-	if data == nil {
-		return nil, fmt.Errorf("无效的响应数据")
-	}
-	info := &GroupMemberInfo{}
-	if gid, ok := parseInt64(data["group_id"]); ok {
-		info.GroupID = gid
-	}
-	if uid, ok := parseInt64(data["user_id"]); ok {
-		info.UserID = uid
-	}
-	if nickname, ok := data["nickname"].(string); ok {
-		info.Nickname = nickname
-	}
-	if card, ok := data["card"].(string); ok {
-		info.Card = card
-	}
-	if role, ok := data["role"].(string); ok {
-		info.Role = role
-	}
-	if joinTime, ok := parseInt64(data["join_time"]); ok {
-		info.JoinTime = joinTime
-	}
-	if lastSentTime, ok := parseInt64(data["last_sent_time"]); ok {
-		info.LastSentTime = lastSentTime
-	}
-	if level, ok := data["level"].(string); ok {
-		info.Level = level
-	}
-	if title, ok := data["title"].(string); ok {
-		info.Title = title
-	}
-	return info, nil
-}
-
-// GetGroupMemberList 获取群成员列表
-func (c *Client) GetGroupMemberList(ctx context.Context, groupID int64, noCache bool) ([]*GroupMemberInfo, error) {
-	resp, err := c.callAPI(ctx, "get_group_member_list", map[string]interface{}{
-		"group_id": groupID,
-		"no_cache": noCache,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// 响应的 data 是数组
-	dataList, ok := resp.Data.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("无效的响应数据格式")
-	}
-
-	var members []*GroupMemberInfo
-	for _, item := range dataList {
-		data, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		info := &GroupMemberInfo{}
-		if gid, ok := parseInt64(data["group_id"]); ok {
-			info.GroupID = gid
-		}
-		if uid, ok := parseInt64(data["user_id"]); ok {
-			info.UserID = uid
-		}
-		if nickname, ok := data["nickname"].(string); ok {
-			info.Nickname = nickname
-		}
-		if card, ok := data["card"].(string); ok {
-			info.Card = card
-		}
-		if role, ok := data["role"].(string); ok {
-			info.Role = role
-		}
-		if joinTime, ok := parseInt64(data["join_time"]); ok {
-			info.JoinTime = joinTime
-		}
-		if lastSentTime, ok := parseInt64(data["last_sent_time"]); ok {
-			info.LastSentTime = lastSentTime
-		}
-		if level, ok := data["level"].(string); ok {
-			info.Level = level
-		}
-		if title, ok := data["title"].(string); ok {
-			info.Title = title
-		}
-		members = append(members, info)
-	}
-	return members, nil
-}
-
-// SetMsgEmojiLike 对消息贴表情
-func (c *Client) SetMsgEmojiLike(ctx context.Context, messageID int64, emojiID int) error {
-	_, err := c.callAPI(ctx, "set_msg_emoji_like", map[string]interface{}{
-		"message_id": messageID,
-		"emoji_id":   emojiID,
-	})
-	return err
-}
-
-// MarkMsgAsRead 标记消息已读
 func (c *Client) MarkMsgAsRead(ctx context.Context, messageID int64) error {
-	_, err := c.callAPI(ctx, "mark_msg_as_read", map[string]interface{}{
-		"message_id": messageID,
-	})
+	_, err := c.callAPI(ctx, "mark_msg_as_read", map[string]interface{}{"message_id": messageID})
 	return err
 }
 
-// GroupPoke 群戳一戳
-func (c *Client) GroupPoke(ctx context.Context, groupID, userID int64) error {
-	_, err := c.callAPI(ctx, "group_poke", map[string]interface{}{
-		"group_id": groupID,
-		"user_id":  userID,
-	})
-	return err
-}
-
-// callAPI 调用 OneBot API（同步等待响应）
 func (c *Client) callAPI(ctx context.Context, action string, params map[string]interface{}) (*APIResponse, error) {
 	if ctx == nil {
 		ctx = c.ctx
@@ -985,15 +590,12 @@ func (c *Client) callAPI(ctx context.Context, action string, params map[string]i
 		defer cancel()
 	}
 
-	echo := fmt.Sprintf("%d", atomic.AddUint64(&c.echoCounter, 1))
+	echo := fmt.Sprintf("%d", c.echoCounter.Add(1))
 
 	// 创建响应通道
 	respCh := make(chan *APIResponse, 1)
 	c.pendingReqs.Store(echo, respCh)
-	defer func() {
-		c.pendingReqs.Delete(echo)
-		close(respCh)
-	}()
+	defer c.pendingReqs.Delete(echo)
 
 	// 发送请求
 	c.connMu.Lock()
@@ -1033,10 +635,9 @@ func (c *Client) callAPI(ctx context.Context, action string, params map[string]i
 
 // handleDisconnect 处理断开连接
 func (c *Client) handleDisconnect() {
-	if c.reconnecting {
+	if !c.reconnecting.CompareAndSwap(false, true) {
 		return
 	}
-	c.reconnecting = true
 
 	zap.L().Warn("连接断开，尝试重连...")
 
@@ -1058,7 +659,7 @@ func (c *Client) handleDisconnect() {
 
 // GetSelfID 获取Bot的QQ号
 func (c *Client) GetSelfID() int64 {
-	return c.selfID
+	return c.selfID.Load()
 }
 
 // Close 关闭连接
@@ -1134,94 +735,6 @@ func parseCardMessage(jsonStr string) *CardMessage {
 	}
 
 	return card
-}
-
-// GetGroupNotice 获取群公告
-func (c *Client) GetGroupNotice(ctx context.Context, groupID int64) ([]GroupNotice, error) {
-	resp, err := c.callAPI(ctx, "_get_group_notice", map[string]interface{}{
-		"group_id": groupID,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	dataList := resp.DataList()
-	if dataList == nil {
-		return nil, nil
-	}
-
-	var notices []GroupNotice
-	for _, item := range dataList {
-		data, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		notice := GroupNotice{}
-		if noticeID, ok := data["notice_id"].(string); ok {
-			notice.NoticeID = noticeID
-		}
-		if senderID, ok := parseInt64(data["sender_id"]); ok {
-			notice.SenderID = senderID
-		}
-		if publishTime, ok := parseInt64(data["publish_time"]); ok {
-			notice.PublishTime = publishTime
-		}
-		if msg, ok := data["message"].(map[string]interface{}); ok {
-			if text, ok := msg["text"].(string); ok {
-				notice.Content = text
-			}
-		}
-		notices = append(notices, notice)
-	}
-	return notices, nil
-}
-
-// GetEssenceMessages 获取群精华消息
-func (c *Client) GetEssenceMessages(ctx context.Context, groupID int64) ([]EssenceMessage, error) {
-	resp, err := c.callAPI(ctx, "get_essence_msg_list", map[string]interface{}{
-		"group_id": groupID,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	dataList := resp.DataList()
-	if dataList == nil {
-		return nil, nil
-	}
-
-	var messages []EssenceMessage
-	for _, item := range dataList {
-		data, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		msg := EssenceMessage{}
-		if msgID, ok := parseInt64(data["message_id"]); ok {
-			msg.MessageID = msgID
-		}
-		if senderID, ok := parseInt64(data["sender_id"]); ok {
-			msg.SenderID = senderID
-		}
-		if senderNick, ok := data["sender_nick"].(string); ok {
-			msg.SenderNick = senderNick
-		}
-		if operatorID, ok := parseInt64(data["operator_id"]); ok {
-			msg.OperatorID = operatorID
-		}
-		if operatorNick, ok := data["operator_nick"].(string); ok {
-			msg.OperatorNick = operatorNick
-		}
-		if operatorTime, ok := parseInt64(data["operator_time"]); ok {
-			msg.OperatorTime = operatorTime
-		}
-		// 解析消息内容
-		if content, ok := data["content"].([]interface{}); ok {
-			msg.Content = extractTextFromSegments(content)
-		}
-		messages = append(messages, msg)
-	}
-	return messages, nil
 }
 
 // GetForwardMsg 获取合并转发消息内容
@@ -1329,45 +842,6 @@ func extractTextFromSegments(segments []interface{}) string {
 		}
 	}
 	return strings.Join(parts, "")
-}
-
-// GetMessageReactions 获取消息的表情回应
-func (c *Client) GetMessageReactions(ctx context.Context, messageID int64) ([]EmojiReaction, error) {
-	// 通过 get_msg 获取消息详情，其中包含 emoji_likes_list
-	msgData, err := c.GetMsg(ctx, messageID)
-	if err != nil {
-		return nil, err
-	}
-
-	emojiList, ok := msgData["emoji_likes_list"].([]interface{})
-	if !ok || len(emojiList) == 0 {
-		return nil, nil
-	}
-
-	var reactions []EmojiReaction
-	for _, item := range emojiList {
-		emojiData, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		reaction := EmojiReaction{}
-		if emojiID, ok := parseInt(emojiData["emoji_id"]); ok {
-			reaction.EmojiID = emojiID
-		}
-
-		if count, ok := parseInt(emojiData["likes_cnt"]); ok {
-			reaction.Count = count
-		}
-		if reaction.EmojiID > 0 {
-			reactions = append(reactions, reaction)
-		}
-	}
-	return reactions, nil
-}
-
-// SendGroupImageMessage 发送群图片/表情包消息。
-func (c *Client) SendGroupImageMessage(ctx context.Context, groupID int64, filePath string, isSticker bool) (int64, error) {
-	return c.sendImageMessage(ctx, "send_group_msg", "group_id", groupID, filePath, isSticker)
 }
 
 // SendPrivateImageMessage 发送私聊图片/表情包消息。

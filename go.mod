@@ -1,4 +1,4 @@
-module mumu-bot
+module github.com/kisara71/luma
 
 go 1.25.0
 
@@ -168,10 +168,8 @@ require (
 	github.com/bytedance/sonic v1.15.0
 	github.com/cloudwego/eino-ext/components/embedding/openai v0.0.0-20260323112355-f061db7e8419
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.10
-	github.com/cloudwego/eino-ext/components/tool/httprequest v0.0.0-20260323112355-f061db7e8419
 	github.com/cloudwego/eino-ext/components/tool/mcp v0.0.8
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.45.0
-	github.com/petar-dambovaliev/aho-corasick v0.0.0-20250424160509-463d218d4745
 	go.uber.org/zap v1.27.1
 )

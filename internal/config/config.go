@@ -1,137 +1,94 @@
 package config
 
 import (
+	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 var (
-	cfg  *Config
-	once sync.Once
+	cfg     *Config
+	loadErr error
+	once    sync.Once
 )
 
-// Config 全局配置结构
 type Config struct {
-	App            AppConfig       `yaml:"app"`
-	Persona        PersonaConfig   `yaml:"persona"`
-	OneBot         OneBotConfig    `yaml:"onebot"`
-	Groups         []GroupConfig   `yaml:"groups"`
-	Users          []UserConfig    `yaml:"users"`
-	Agent          AgentConfig     `yaml:"agent"`
-	Chat           ChatConfig      `yaml:"chat"`     // 聊天行为配置
-	Learning       LearningConfig  `yaml:"learning"` // 学习系统配置
-	LLM            LLMConfig       `yaml:"llm"`
-	AuxiliaryModel AuxLLMConfig    `yaml:"auxiliary_model"` // 辅助模型配置
-	Embedding      EmbeddingConfig `yaml:"embedding"`
-	VisionLLM      VisionLLMConfig `yaml:"vision_llm"`
-	Memory         MemoryConfig    `yaml:"memory"`
-	Sticker        StickerConfig   `yaml:"sticker"` // 表情包配置
-	Server         ServerConfig    `yaml:"server"`
-	Debug          DebugConfig     `yaml:"debug"` // 调试配置
+	App       AppConfig       `yaml:"app"`
+	Persona   PersonaConfig   `yaml:"persona"`
+	OneBot    OneBotConfig    `yaml:"onebot"`
+	Users     []UserConfig    `yaml:"users"`
+	Agent     AgentConfig     `yaml:"agent"`
+	Chat      ChatConfig      `yaml:"chat"`
+	LLM       LLMConfig       `yaml:"llm"`
+	Embedding EmbeddingConfig `yaml:"embedding"`
+	VisionLLM VisionLLMConfig `yaml:"vision_llm"`
+	Memory    MemoryConfig    `yaml:"memory"`
+	Sticker   StickerConfig   `yaml:"sticker"`
+	Server    ServerConfig    `yaml:"server"`
+	Debug     DebugConfig     `yaml:"debug"`
 }
 
-// AppConfig 应用基础配置
 type AppConfig struct {
 	Debug    bool   `yaml:"debug"`
 	LogLevel string `yaml:"log_level"`
 }
 
-// PersonaConfig 人格配置
 type PersonaConfig struct {
 	Name          string   `yaml:"name"`
-	QQ            int64    `yaml:"qq"`          // 沐沐的QQ号
-	AliasNames    []string `yaml:"alias_names"` // 别名，都可以触发@检测
 	Interests     []string `yaml:"interests"`
 	SpeakingStyle string   `yaml:"speaking_style"`
-	Personality   string   `yaml:"personality"` // 人格描述
+	Personality   string   `yaml:"personality"`
 }
 
-// OneBotConfig OneBot协议配置
 type OneBotConfig struct {
 	WsURL             string `yaml:"ws_url"`
 	AccessToken       string `yaml:"access_token"`
 	ReconnectInterval int    `yaml:"reconnect_interval"`
 }
 
-// GroupConfig 群配置
-type GroupConfig struct {
-	GroupID     int64  `yaml:"group_id"`
-	Enabled     bool   `yaml:"enabled"`
-	ExtraPrompt string `yaml:"extra_prompt"` // 群专属额外提示词
-}
-
-// UserConfig 私聊配置
 type UserConfig struct {
 	UserID      int64  `yaml:"user_id"`
 	Enabled     bool   `yaml:"enabled"`
 	ExtraPrompt string `yaml:"extra_prompt"`
 }
 
-// AgentConfig Agent决策配置
 type AgentConfig struct {
-	ObserveWindow            int  `yaml:"observe_window"`              // 观察窗口时间（秒）
-	ThinkInterval            int  `yaml:"think_interval"`              // 决策间隔（秒）
-	ThinkDebounceMS          int  `yaml:"think_debounce_ms"`           // 思考聚合窗口（毫秒）
-	MessageBufferSizeGroup   int  `yaml:"message_buffer_size_group"`   // 消息缓冲区大小(群聊)
-	MessageBufferSizePrivate int  `yaml:"message_buffer_size_private"` // 消息缓冲区大小(私聊)
-	MaxStep                  int  `yaml:"max_step"`                    // ReAct 最大步数
-	MaxCoroutine             int  `yaml:"max_coroutine"`               // 最大并发思考进程数（0表示不限制）
-	EnableActiveRetrieval    bool `yaml:"enable_active_retrieval"`     // 是否启用主动记忆检索（阈值固定0.7）
+	ThinkDebounceMS        int  `yaml:"think_debounce_ms"`
+	MessageBufferSize      int  `yaml:"message_buffer_size"`
+	MaxStep                int  `yaml:"max_step"`
+	MaxCoroutine           int  `yaml:"max_coroutine"`
+	EnableActiveRetrieval  bool `yaml:"enable_active_retrieval"`
+	ProactiveCheckInterval int  `yaml:"proactive_check_interval_sec"`
 }
 
-// ChatConfig 聊天行为配置
 type ChatConfig struct {
-	TalkFrequency    float64          `yaml:"talk_frequency"`    // 聊天频率，0-1，越大越活跃
-	TypingSimulation bool             `yaml:"typing_simulation"` // 是否模拟打字延迟
-	TypingSpeed      int              `yaml:"typing_speed"`      // 每秒打字速度（字符）
-	EnableTimeRules  bool             `yaml:"enable_time_rules"` // 是否启用时段规则
-	TimeRules        []TimeRuleConfig `yaml:"time_rules"`        // 时段发言频率规则
-	RateLimit        RateLimitConfig  `yaml:"rate_limit"`        // 频率限制配置
+	TypingSimulation bool            `yaml:"typing_simulation"`
+	TypingSpeed      int             `yaml:"typing_speed"`
+	Proactive        ProactiveConfig `yaml:"proactive"`
 }
 
-// RateLimitConfig 频率限制配置
-type RateLimitConfig struct {
-	Enabled     bool    `yaml:"enabled"`      // 是否启用
-	PeriodSec   int     `yaml:"period_sec"`   // 统计周期（秒）
-	MaxMessages int     `yaml:"max_messages"` // 最大消息数
-	MinProb     float64 `yaml:"min_prob"`     // 最小保底概率（默认0.1）
+// ProactiveConfig creates one future contact time after a conversation.
+// It intentionally has no per-tick probability: repeated Bernoulli trials caused
+// the old burst/silence behaviour.
+type ProactiveConfig struct {
+	Enabled        bool `yaml:"enabled"`
+	MinIdleMinutes int  `yaml:"min_idle_minutes"`
+	MaxIdleMinutes int  `yaml:"max_idle_minutes"`
+	QuietStartHour int  `yaml:"quiet_start_hour"`
+	QuietEndHour   int  `yaml:"quiet_end_hour"`
 }
 
-// TimeRuleConfig 时段规则配置
-type TimeRuleConfig struct {
-	TimeRange string  `yaml:"time_range"` // 时间范围，如 "00:00-08:00"
-	GroupID   int64   `yaml:"group_id"`   // 群ID，0表示全局
-	TalkValue float64 `yaml:"talk_value"` // 该时段的发言频率
-}
-
-// LearningConfig 学习系统配置
-type LearningConfig struct {
-	Enabled               bool `yaml:"enabled"`                 // 是否启用
-	IntervalMinutes       int  `yaml:"interval_minutes"`        // 学习任务间隔（分钟）
-	ReviewIntervalMinutes int  `yaml:"review_interval_minutes"` // 审核任务间隔（分钟）
-	MaxStep               int  `yaml:"max_step"`                // 学习 Agent 最大步数
-	BatchSize             int  `yaml:"batch_size"`              // 每次学习的消息数量限制
-	MinMsgCount           int  `yaml:"min_msg_count"`           // 触发学习的最少消息数量
-}
-
-// LLMConfig LLM 配置
 type LLMConfig struct {
 	APIKey      string                 `yaml:"api_key"`
 	BaseURL     string                 `yaml:"base_url"`
 	Model       string                 `yaml:"model"`
-	ExtraFields map[string]interface{} `yaml:"extra_fields"` // 额外参数
+	ExtraFields map[string]interface{} `yaml:"extra_fields"`
 }
 
-// AuxLLMConfig 辅助 LLM 配置（结构相同但类型独立，方便扩展）
-type AuxLLMConfig struct {
-	APIKey  string `yaml:"api_key"`
-	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
-}
-
-// EmbeddingConfig Embedding 模型配置
 type EmbeddingConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	APIKey  string `yaml:"api_key"`
@@ -139,7 +96,6 @@ type EmbeddingConfig struct {
 	Model   string `yaml:"model"`
 }
 
-// VisionLLMConfig 多模态视觉模型配置
 type VisionLLMConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	APIKey  string `yaml:"api_key"`
@@ -147,21 +103,18 @@ type VisionLLMConfig struct {
 	Model   string `yaml:"model"`
 }
 
-// MemoryConfig 记忆系统配置
 type MemoryConfig struct {
 	MySQL             MySQLConfig             `yaml:"mysql"`
 	Milvus            MilvusConfig            `yaml:"milvus"`
 	MessageLogCleanup MessageLogCleanupConfig `yaml:"message_log_cleanup"`
 }
 
-// MessageLogCleanupConfig 消息日志清理配置
 type MessageLogCleanupConfig struct {
-	Enabled       *bool `yaml:"enabled"`        // 是否启用，默认 true
-	IntervalHours int   `yaml:"interval_hours"` // 清理间隔（小时），默认 6
-	KeepLatest    int   `yaml:"keep_latest"`    // 每个群保留最新消息数
+	Enabled       *bool `yaml:"enabled"`
+	IntervalHours int   `yaml:"interval_hours"`
+	KeepLatest    int   `yaml:"keep_latest"`
 }
 
-// MySQLConfig MySQL 数据库配置
 type MySQLConfig struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
@@ -170,107 +123,202 @@ type MySQLConfig struct {
 	DBName   string `yaml:"db_name"`
 }
 
-// MilvusConfig Milvus 向量数据库配置
 type MilvusConfig struct {
 	Address        string `yaml:"address"`
 	DBName         string `yaml:"db_name"`
 	CollectionName string `yaml:"collection_name"`
 	VectorDim      int    `yaml:"vector_dim"`
-	MetricType     string `yaml:"metric_type"` // IP, L2, COSINE
+	MetricType     string `yaml:"metric_type"`
 }
 
-// StickerConfig 表情包配置
 type StickerConfig struct {
-	AutoSave    bool   `yaml:"auto_save"`    // 是否自动保存收到的表情包，默认 true
-	StoragePath string `yaml:"storage_path"` // 表情包存储目录，默认 "data/stickers"
-	MaxSizeMB   int    `yaml:"max_size_mb"`  // 单个文件最大大小(MB)，默认 5
+	AutoSave    bool   `yaml:"auto_save"`
+	StoragePath string `yaml:"storage_path"`
+	MaxSizeMB   int    `yaml:"max_size_mb"`
 }
 
-// ServerConfig HTTP服务配置
 type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
 }
 
-// DebugConfig 调试配置
 type DebugConfig struct {
-	ShowPrompt    bool `yaml:"show_prompt"`     // 显示系统提示词
-	ShowThinking  bool `yaml:"show_thinking"`   // 显示思考过程
-	ShowMemory    bool `yaml:"show_memory"`     // 显示记忆检索
-	ShowToolCalls bool `yaml:"show_tool_calls"` // 显示工具调用
+	ShowPrompt    bool `yaml:"show_prompt"`
+	ShowThinking  bool `yaml:"show_thinking"`
+	ShowMemory    bool `yaml:"show_memory"`
+	ShowToolCalls bool `yaml:"show_tool_calls"`
 }
 
-// Load 加载配置文件
 func Load(path string) (*Config, error) {
-	var err error
 	once.Do(func() {
-		var data []byte
-		data, err = os.ReadFile(path)
-		if err != nil {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			loadErr = readErr
 			return
 		}
 
 		cfg = &Config{}
-		err = yaml.Unmarshal(data, cfg)
-		if err != nil {
+		if loadErr = yaml.Unmarshal(data, cfg); loadErr != nil {
 			cfg = nil
 			return
 		}
-
-		// 从环境变量覆盖敏感配置
-		if apiKey := os.Getenv("MUMU_LLM_API_KEY"); apiKey != "" {
-			cfg.LLM.APIKey = apiKey
-		}
-		// Auxiliary Model API Key
-		if apiKey := os.Getenv("MUMU_AUX_LLM_API_KEY"); apiKey != "" {
-			cfg.AuxiliaryModel.APIKey = apiKey
-		} else if cfg.AuxiliaryModel.APIKey == "" && cfg.LLM.APIKey != "" {
-			// 如果没配辅助模型Key，且没设置专用环境变量，尝试复用主模型的Key
-			cfg.AuxiliaryModel.APIKey = cfg.LLM.APIKey
-		}
-
-		// Embedding API Key：优先使用专用环境变量，否则使用 LLM 的
-		if apiKey := os.Getenv("MUMU_EMBEDDING_API_KEY"); apiKey != "" {
-			cfg.Embedding.APIKey = apiKey
-		} else if cfg.Embedding.APIKey == "" && cfg.LLM.APIKey != "" {
-			cfg.Embedding.APIKey = cfg.LLM.APIKey
-		}
-		if apiKey := os.Getenv("MUMU_VISION_API_KEY"); apiKey != "" {
-			cfg.VisionLLM.APIKey = apiKey
-		} else if cfg.VisionLLM.APIKey == "" && cfg.LLM.APIKey != "" {
-			cfg.VisionLLM.APIKey = cfg.LLM.APIKey
-		}
-		if token := os.Getenv("MUMU_ONEBOT_TOKEN"); token != "" {
-			cfg.OneBot.AccessToken = token
-		}
-		// MySQL 密码
-		if password := os.Getenv("MUMU_MYSQL_PASSWORD"); password != "" {
-			cfg.Memory.MySQL.Password = password
+		applyEnvironment(cfg)
+		loadErr = validate(cfg)
+		if loadErr != nil {
+			cfg = nil
 		}
 	})
-	return cfg, err
+	return cfg, loadErr
 }
 
-// Get 获取全局配置
-func Get() *Config {
-	return cfg
+func applyEnvironment(c *Config) {
+	if value := os.Getenv("LUMA_LLM_API_KEY"); value != "" {
+		c.LLM.APIKey = value
+	}
+	if value := os.Getenv("LUMA_EMBEDDING_API_KEY"); value != "" {
+		c.Embedding.APIKey = value
+	} else if c.Embedding.APIKey == "" {
+		c.Embedding.APIKey = c.LLM.APIKey
+	}
+	if value := os.Getenv("LUMA_VISION_API_KEY"); value != "" {
+		c.VisionLLM.APIKey = value
+	} else if c.VisionLLM.APIKey == "" {
+		c.VisionLLM.APIKey = c.LLM.APIKey
+	}
+	if value := os.Getenv("LUMA_ONEBOT_TOKEN"); value != "" {
+		c.OneBot.AccessToken = value
+	}
+	if value := os.Getenv("LUMA_MYSQL_PASSWORD"); value != "" {
+		c.Memory.MySQL.Password = value
+	}
 }
 
-// GetGroupConfig 获取指定群的配置
-func (c *Config) GetGroupConfig(groupID int64) *GroupConfig {
-	for i := range c.Groups {
-		if c.Groups[i].GroupID == groupID {
-			return &c.Groups[i]
+func validate(c *Config) error {
+	if c.Persona.Name == "" {
+		return fmt.Errorf("persona.name 必须配置")
+	}
+	if c.OneBot.WsURL == "" {
+		return fmt.Errorf("onebot.ws_url 必须配置")
+	}
+	oneBotURL, err := url.Parse(c.OneBot.WsURL)
+	if err != nil || (oneBotURL.Scheme != "ws" && oneBotURL.Scheme != "wss") || oneBotURL.Host == "" {
+		return fmt.Errorf("onebot.ws_url 必须是有效的 ws 或 wss 地址")
+	}
+	if c.OneBot.ReconnectInterval <= 0 {
+		c.OneBot.ReconnectInterval = 5
+	}
+	if c.LLM.Model == "" || c.LLM.BaseURL == "" {
+		return fmt.Errorf("llm.model 和 llm.base_url 必须配置")
+	}
+	if c.Embedding.Enabled {
+		if c.Embedding.Model == "" || c.Embedding.BaseURL == "" {
+			return fmt.Errorf("启用 embedding 时 model 和 base_url 必须配置")
 		}
+		if c.Memory.Milvus.Address == "" {
+			c.Memory.Milvus.Address = "127.0.0.1:19530"
+		}
+		if c.Memory.Milvus.DBName == "" {
+			c.Memory.Milvus.DBName = "default"
+		}
+		if c.Memory.Milvus.CollectionName == "" {
+			c.Memory.Milvus.CollectionName = "luma_memories"
+		}
+		if c.Memory.Milvus.VectorDim <= 0 {
+			c.Memory.Milvus.VectorDim = 1024
+		}
+		if c.Memory.Milvus.MetricType == "" {
+			c.Memory.Milvus.MetricType = "COSINE"
+		}
+		switch strings.ToUpper(c.Memory.Milvus.MetricType) {
+		case "COSINE", "IP", "L2":
+			c.Memory.Milvus.MetricType = strings.ToUpper(c.Memory.Milvus.MetricType)
+		default:
+			return fmt.Errorf("memory.milvus.metric_type 只支持 COSINE、IP 或 L2")
+		}
+	}
+	if c.VisionLLM.Enabled && (c.VisionLLM.Model == "" || c.VisionLLM.BaseURL == "") {
+		return fmt.Errorf("启用 vision_llm 时 model 和 base_url 必须配置")
+	}
+	if c.Memory.MySQL.Host == "" {
+		c.Memory.MySQL.Host = "127.0.0.1"
+	}
+	if c.Memory.MySQL.Port <= 0 {
+		c.Memory.MySQL.Port = 3306
+	}
+	if c.Memory.MySQL.User == "" {
+		return fmt.Errorf("memory.mysql.user 必须配置")
+	}
+	if c.Memory.MySQL.DBName == "" {
+		c.Memory.MySQL.DBName = "luma"
+	}
+	if len(c.Users) == 0 {
+		return fmt.Errorf("至少需要配置一个私聊用户")
+	}
+	enabledUsers := 0
+	seenUsers := make(map[int64]struct{}, len(c.Users))
+	for _, user := range c.Users {
+		if user.UserID <= 0 {
+			return fmt.Errorf("users.user_id 必须是正整数")
+		}
+		if _, exists := seenUsers[user.UserID]; exists {
+			return fmt.Errorf("users 中存在重复用户: %d", user.UserID)
+		}
+		seenUsers[user.UserID] = struct{}{}
+		if user.Enabled {
+			enabledUsers++
+		}
+	}
+	if enabledUsers == 0 {
+		return fmt.Errorf("至少需要启用一个私聊用户")
+	}
+	if c.Chat.Proactive.QuietStartHour < 0 || c.Chat.Proactive.QuietStartHour > 23 ||
+		c.Chat.Proactive.QuietEndHour < 0 || c.Chat.Proactive.QuietEndHour > 23 {
+		return fmt.Errorf("主动联系静默时段必须在 0 到 23 点之间")
+	}
+	if c.Chat.Proactive.MinIdleMinutes <= 0 {
+		c.Chat.Proactive.MinIdleMinutes = 90
+	}
+	if c.Chat.Proactive.MaxIdleMinutes < c.Chat.Proactive.MinIdleMinutes {
+		c.Chat.Proactive.MaxIdleMinutes = c.Chat.Proactive.MinIdleMinutes
+	}
+	if c.Agent.ProactiveCheckInterval <= 0 {
+		c.Agent.ProactiveCheckInterval = 60
+	}
+	if c.Agent.ThinkDebounceMS <= 0 {
+		c.Agent.ThinkDebounceMS = 3200
+	}
+	if c.Agent.MessageBufferSize <= 0 {
+		c.Agent.MessageBufferSize = 40
+	}
+	if c.Agent.MaxStep <= 0 {
+		c.Agent.MaxStep = 6
+	}
+	if c.Agent.MaxCoroutine <= 0 {
+		c.Agent.MaxCoroutine = 3
+	}
+	if c.Chat.TypingSpeed <= 0 {
+		c.Chat.TypingSpeed = 6
+	}
+	if c.Sticker.StoragePath == "" {
+		c.Sticker.StoragePath = "./stickers"
+	}
+	if c.Sticker.MaxSizeMB <= 0 {
+		c.Sticker.MaxSizeMB = 2
+	}
+	if c.Server.Host == "" {
+		c.Server.Host = "127.0.0.1"
+	}
+	if c.Server.Port <= 0 {
+		c.Server.Port = 8080
+	}
+	if c.Server.Port > 65535 {
+		return fmt.Errorf("server.port 必须在 1 到 65535 之间")
 	}
 	return nil
 }
 
-// IsGroupEnabled 检查群是否启用
-func (c *Config) IsGroupEnabled(groupID int64) bool {
-	gc := c.GetGroupConfig(groupID)
-	return gc != nil && gc.Enabled
-}
+func Get() *Config { return cfg }
+
 func (c *Config) GetUserConfig(userID int64) *UserConfig {
 	for i := range c.Users {
 		if c.Users[i].UserID == userID {
@@ -279,7 +327,8 @@ func (c *Config) GetUserConfig(userID int64) *UserConfig {
 	}
 	return nil
 }
+
 func (c *Config) IsUserEnabled(userID int64) bool {
-	uc := c.GetUserConfig(userID)
-	return uc != nil && uc.Enabled
+	user := c.GetUserConfig(userID)
+	return user != nil && user.Enabled
 }

@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 	"fmt"
-	"mumu-bot/internal/config"
-	"mumu-bot/internal/memory"
-	"mumu-bot/internal/session"
+	"github.com/kisara71/luma/internal/config"
+	"github.com/kisara71/luma/internal/memory"
+	"github.com/kisara71/luma/internal/session"
 	"net/http"
 	"strconv"
 	"time"
@@ -22,18 +22,12 @@ type Server struct {
 
 // NewServer 创建HTTP服务
 func NewServer(memoryMgr *memory.Manager) *Server {
-	return &Server{
-		memoryMgr: memoryMgr,
-	}
-}
-
-// Start 启动HTTP服务
-func (s *Server) Start() {
 	cfg := config.Get()
 	if !cfg.App.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	s := &Server{memoryMgr: memoryMgr}
 	r := gin.Default()
 
 	// 健康检查
@@ -47,9 +41,9 @@ func (s *Server) Start() {
 		api.GET("/memories/:id", s.getMemory)
 		api.DELETE("/memories/:id", s.deleteMemory)
 
-		// 成员画像
-		api.GET("/members", s.listMembers)
-		api.GET("/members/:user_id", s.getMember)
+		// 用户画像
+		api.GET("/users", s.listUsers)
+		api.GET("/users/:user_id", s.getUser)
 
 		// 消息记录
 		api.GET("/messages", s.listMessages)
@@ -66,11 +60,16 @@ func (s *Server) Start() {
 		Addr:    addr,
 		Handler: r,
 	}
+	return s
+}
 
-	zap.L().Info("HTTP 服务启动", zap.String("addr", addr))
+// Start 启动HTTP服务并将启动或运行错误交给进程生命周期管理。
+func (s *Server) Start() error {
+	zap.L().Info("HTTP 服务启动", zap.String("addr", s.server.Addr))
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		zap.L().Error("HTTP 服务异常", zap.Error(err))
+		return fmt.Errorf("HTTP 服务异常: %w", err)
 	}
+	return nil
 }
 
 // Stop 停止HTTP服务
@@ -86,7 +85,7 @@ func (s *Server) Stop() {
 func (s *Server) healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status": "ok",
-		"name":   "amu_bot",
+		"name":   "luma",
 		"time":   time.Now().Format(time.RFC3339),
 	})
 }
@@ -106,11 +105,15 @@ func parsePageParams(c *gin.Context) (page, pageSize int) {
 
 // listMemories 列出记忆
 func (s *Server) listMemories(c *gin.Context) {
-	groupID, _ := strconv.ParseInt(c.DefaultQuery("group_id", "0"), 10, 64)
+	userID, _ := strconv.ParseInt(c.DefaultQuery("user_id", "0"), 10, 64)
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id 必填"})
+		return
+	}
 	memType := c.DefaultQuery("type", "")
 	page, pageSize := parsePageParams(c)
 
-	memories, total, err := s.memoryMgr.ListMemoriesByConversation(session.GroupConversationRef(groupID), memType, page, pageSize)
+	memories, total, err := s.memoryMgr.ListMemoriesByConversation(session.NewRef(userID), memType, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -157,10 +160,10 @@ func (s *Server) deleteMemory(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
 
-// listMembers 列出成员画像
-func (s *Server) listMembers(c *gin.Context) {
+// listUsers 列出用户画像
+func (s *Server) listUsers(c *gin.Context) {
 	page, pageSize := parsePageParams(c)
-	profiles, total, err := s.memoryMgr.ListMemberProfiles(page, pageSize)
+	profiles, total, err := s.memoryMgr.ListUserProfiles(page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -174,8 +177,8 @@ func (s *Server) listMembers(c *gin.Context) {
 	})
 }
 
-// getMember 获取单个成员画像
-func (s *Server) getMember(c *gin.Context) {
+// getUser 获取单个用户画像
+func (s *Server) getUser(c *gin.Context) {
 	userID, err := strconv.ParseInt(c.Param("user_id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的用户 ID"})
@@ -186,7 +189,7 @@ func (s *Server) getMember(c *gin.Context) {
 	query := s.memoryMgr.GetDB().Where("user_id = ?", userID)
 
 	if err := query.First(&profile).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "成员不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
 		return
 	}
 
@@ -195,10 +198,14 @@ func (s *Server) getMember(c *gin.Context) {
 
 // listMessages 列出消息记录
 func (s *Server) listMessages(c *gin.Context) {
-	groupID, _ := strconv.ParseInt(c.DefaultQuery("group_id", "0"), 10, 64)
+	userID, _ := strconv.ParseInt(c.DefaultQuery("user_id", "0"), 10, 64)
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id 必填"})
+		return
+	}
 	page, pageSize := parsePageParams(c)
 
-	messages, total, err := s.memoryMgr.ListMessageLogsByConversation(session.GroupConversationRef(groupID), page, pageSize)
+	messages, total, err := s.memoryMgr.ListMessageLogsByConversation(session.NewRef(userID), page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -226,13 +233,12 @@ func (s *Server) getStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "running",
 		"persona": cfg.Persona.Name,
-		"groups":  len(cfg.Groups),
+		"users":   len(cfg.Users),
 		"uptime":  time.Now().Format(time.RFC3339),
 		"stats":   stats,
 		"config": gin.H{
-			"think_interval": cfg.Agent.ThinkInterval,
-			"observe_window": cfg.Agent.ObserveWindow,
-			"llm_model":      cfg.LLM.Model,
+			"proactive_check_interval": cfg.Agent.ProactiveCheckInterval,
+			"llm_model":                cfg.LLM.Model,
 		},
 	})
 }

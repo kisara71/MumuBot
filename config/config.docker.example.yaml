@@ -1,71 +1,47 @@
-# MumuBot Docker 示例配置
+# Luma 私聊虚拟伴侣配置
 
 app:
-  debug: true
-  log_level: "debug"
+  debug: false
+  log_level: "info"
 
 persona:
-  name: "沐沐大魔王"
-  qq: 123456789
-  alias_names:
-    - "mumu"
-    - "牢沐"
-    - "沐沐"
-  interests:
-    - "编程"
-    - "数码科技"
-    - "二次元"
+  name: "小悠"
+  interests: ["游戏", "动画", "数码科技"]
   speaking_style: |
-    常用15字以内短句，口语化，不用书面语
-    幽默有趣但不浮夸，表达果断不含糊
-    禁止猜测、编造不知道的信息
-  personality: "你是大二在读女大学生，现在正在上网和群友聊天"
+    以短句和口语为主，像真实的同龄朋友
+    有自己的看法，不需要处处附和
+    少用反问、总结句和客服式表达
+    不知道的事情直接说不知道
+  personality: "在读大学生，温柔但有主见，会自然地关心熟悉的人"
 
 onebot:
-  # Docker 内通过 host.docker.internal 连接宿主机上的 OneBot 服务
   ws_url: "ws://host.docker.internal:3001"
   access_token: ""
   reconnect_interval: 5
 
-groups:
-  - group_id: 123456789
-    enabled: true
-    extra_prompt: ""
-
+# 只处理明确启用的私聊对象。
 users:
   - user_id: 987654321
-    enabled: false
+    enabled: true
     extra_prompt: ""
 
 agent:
-  observe_window: 45
-  think_interval: 15
-  think_debounce_ms: 4800
-  message_buffer_size_group: 20
-  message_buffer_size_private: 50
-  max_step: 12
+  think_debounce_ms: 3200
+  message_buffer_size: 40
+  max_step: 6
   max_coroutine: 3
   enable_active_retrieval: true
+  proactive_check_interval_sec: 60
 
 chat:
-  talk_frequency: 0.7
   typing_simulation: true
   typing_speed: 6
-  enable_time_rules: false
-  time_rules: []
-  rate_limit:
+  proactive:
     enabled: true
-    period_sec: 300
-    max_messages: 30
-    min_prob: 0.1
-
-learning:
-  enabled: true
-  interval_minutes: 10
-  review_interval_minutes: 45
-  max_step: 10
-  batch_size: 100
-  min_msg_count: 5
+    min_idle_minutes: 90
+    max_idle_minutes: 300
+    quiet_start_hour: 0
+    quiet_end_hour: 8
 
 llm:
   api_key: ""
@@ -75,13 +51,9 @@ llm:
     thinking:
       type: "disabled"
 
-auxiliary_model:
-  api_key: ""
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-4.1-mini"
-
 embedding:
-  enabled: true
+  # 轻量部署默认关闭；需要语义记忆时启用并用 Compose 的 vector profile。
+  enabled: false
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "text-embedding-3-large"
@@ -94,15 +66,15 @@ vision_llm:
 
 memory:
   mysql:
-    host: "127.0.0.1"
+    host: "mysql"
     port: 3306
     user: "root"
     password: ""
-    db_name: "mumu_bot"
+    db_name: "luma"
   milvus:
-    address: "127.0.0.1:19530"
+    address: "milvus:19530"
     db_name: "default"
-    collection_name: "mumu_memories"
+    collection_name: "luma_memories"
     vector_dim: 1024
     metric_type: "COSINE"
   message_log_cleanup:
@@ -115,12 +87,13 @@ sticker:
   storage_path: "./stickers"
   max_size_mb: 2
 
+# 管理 API 默认只监听本机；云端不要直接暴露。
 server:
   host: "0.0.0.0"
   port: 8080
 
 debug:
-  show_prompt: true
-  show_thinking: true
-  show_memory: true
-  show_tool_calls: true
+  show_prompt: false
+  show_thinking: false
+  show_memory: false
+  show_tool_calls: false

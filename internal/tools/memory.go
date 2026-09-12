@@ -3,9 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
-	"mumu-bot/internal/llm"
-	"mumu-bot/internal/memory"
-	"mumu-bot/internal/session"
+	"github.com/kisara71/luma/internal/llm"
+	"github.com/kisara71/luma/internal/memory"
 	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -18,14 +17,11 @@ import (
 
 // SaveMemoryInput 保存记忆的输入参数
 type SaveMemoryInput struct {
-	// Type 记忆类型：group_fact(群事实)、user_fact(用户事实)、self_experience(自身经历)、conversation(对话)
-	Type string `json:"type" jsonschema:"enum=group_fact,enum=user_fact,enum=self_experience,enum=conversation,description=记忆类型：group_fact=群相关的长期事实、user_fact=某个用户的稳定事实（私聊优先）、self_experience=你自己的经历和感受、conversation=对话中的重要信息"`
+	Type string `json:"type" jsonschema:"enum=user_fact,enum=self_experience,enum=conversation,enum=expression,description=user_fact=对方的稳定事实，self_experience=这段关系中的自身经历，conversation=阶段性上下文，expression=这个人特有的词或梗及其语境"`
 	// Content 要记住的内容，用自然语言描述
 	Content string `json:"content" jsonschema:"description=要记住的内容，用自然语言描述清楚"`
 	// Importance 重要性评分，0-1之间
 	Importance float64 `json:"importance,omitempty" jsonschema:"minimum=0,maximum=1,description=重要性评分(0-1)，越重要越高"`
-	// RelatedUserID 相关的用户ID（可选）
-	RelatedUserID int64 `json:"related_user_id,omitempty" jsonschema:"description=如果这条记忆与某个用户相关，填写其QQ号，否则填0"`
 }
 
 // SaveMemoryOutput 保存记忆的输出
@@ -51,24 +47,21 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 
 	// 验证记忆类型
 	validTypes := map[string]bool{
-		string(memory.MemoryTypeGroupFact):      true,
 		string(memory.MemoryTypeUserFact):       true,
 		string(memory.MemoryTypeSelfExperience): true,
 		string(memory.MemoryTypeConversation):   true,
+		string(memory.MemoryTypeExpression):     true,
 	}
 	if !validTypes[input.Type] {
-		return &SaveMemoryOutput{Success: false, Message: "无效的记忆类型，可选: group_fact, user_fact, self_experience, conversation"}, nil
+		return &SaveMemoryOutput{Success: false, Message: "无效的记忆类型，可选: user_fact, self_experience, conversation, expression"}, nil
 	}
 
 	// 向量相似度搜索
 	targetType := memory.MemoryType(input.Type)
-	if targetType == memory.MemoryTypeUserFact && !ref.IsPrivate() {
-		return &SaveMemoryOutput{Success: false, Message: "user_fact 仅允许在私聊中保存"}, nil
-	}
 	similarMems, err := tc.MemoryMgr.SearchSimilarMemoriesByConversation(ctx, input.Content, ref, targetType, 30, 0.85)
 	if err == nil && len(similarMems) > 0 {
-		// 调用辅助模型进行合并
-		auxModel, err := llm.NewAuxClient()
+		// 复用主模型进行合并，避免为低频任务维护第二套模型配置。
+		mergeModel, err := llm.NewClient()
 		if err == nil {
 			var oldContents []string
 			for _, m := range similarMems {
@@ -90,7 +83,7 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 3. 如果新记忆是旧记忆的更新（例如状态变化），请以最新状态为准，但保留重要历史背景。
 4. 只输出合并后的记忆内容，不要包含其他废话。`, strings.Join(oldContents, "\n"), input.Content)
 
-			resp, err := auxModel.Generate(ctx, []*schema.Message{
+			resp, err := mergeModel.Generate(ctx, []*schema.Message{
 				schema.UserMessage(prompt),
 			})
 
@@ -111,24 +104,15 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 				}
 			}
 		} else {
-			zap.L().Warn("辅助模型初始化失败，跳过记忆合并", zap.Error(err))
+			zap.L().Warn("记忆合并模型初始化失败，跳过记忆合并", zap.Error(err))
 		}
 	}
 
 	// 如果没有相似记忆或合并失败，直接保存新记忆
-	groupID := ref.GroupID
-	userID := input.RelatedUserID
-	if ref.IsPrivate() {
-		groupID = 0
-		if userID == 0 {
-			userID = ref.UserID
-		}
-	}
 	mem := &memory.Memory{
 		ConversationID: GetConversationID(ctx),
 		Type:           targetType,
-		GroupID:        groupID,
-		UserID:         userID,
+		UserID:         ref.UserID,
 		Content:        input.Content,
 		Importance:     input.Importance,
 	}
@@ -144,11 +128,11 @@ func saveMemoryFunc(ctx context.Context, input *SaveMemoryInput) (*SaveMemoryOut
 func NewSaveMemoryTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"saveMemory",
-		`保存重要信息到长期记忆。当你发现以下情况时应该使用：
-- group_fact：群规、群特色、群里的重要事件、某个话题的结论等
-- user_fact：仅在私聊中使用，保存对方相对稳定的信息，比如偏好、状态、计划
-- self_experience：你参与的有趣对话、被@的经历、你的主观感受和想法
-- conversation：群友说的重要事情、有价值的信息、值得记住的对话内容
+		`保存当前这段关系中真正重要的信息：
+- user_fact：对方稳定的偏好、身份、计划或边界
+- self_experience：你和对方共同经历且以后可能会提起的事
+- conversation：需要跨越短期窗口保留的阶段性上下文
+- expression：这个人特有的词、缩写、梗及其含义和使用语境
 注意：普通闲聊不需要保存，只保存真正有价值的信息。`,
 		saveMemoryFunc,
 	)
@@ -161,9 +145,7 @@ type QueryMemoryInput struct {
 	// Query 搜索关键词或描述
 	Query string `json:"query" jsonschema:"description=搜索关键词或自然语言描述"`
 	// Type 限定记忆类型（可选）
-	Type string `json:"type,omitempty" jsonschema:"enum=,enum=group_fact,enum=user_fact,enum=self_experience,enum=conversation,description=筛选记忆类型（空字符串时不筛选）"`
-	// Scoped 是否只搜索当前会话的记忆
-	Scoped bool `json:"scoped,omitempty" jsonschema:"description=是否只搜索当前会话的记忆，默认false"`
+	Type string `json:"type,omitempty" jsonschema:"enum=,enum=user_fact,enum=self_experience,enum=conversation,enum=expression,description=筛选记忆类型（空字符串时不筛选）"`
 	// Limit 返回结果数量限制，默认10，最大50
 	Limit int `json:"limit,omitempty" jsonschema:"description=返回结果数量限制，默认10，最大50"`
 }
@@ -195,12 +177,7 @@ func queryMemoryFunc(ctx context.Context, input *QueryMemoryInput) (*QueryMemory
 		limit = 50
 	}
 
-	ref := session.AllConversationRef()
-	if input.Scoped {
-		ref = tc.SessionRef()
-	}
-
-	memories, err := tc.MemoryMgr.QueryMemoryByConversation(ctx, input.Query, ref, memory.MemoryType(input.Type), limit)
+	memories, err := tc.MemoryMgr.QueryMemoryByConversation(ctx, input.Query, tc.SessionRef(), memory.MemoryType(input.Type), limit)
 	if err != nil {
 		return &QueryMemoryOutput{Success: false, Message: err.Error()}, nil
 	}
@@ -226,12 +203,7 @@ func queryMemoryFunc(ctx context.Context, input *QueryMemoryInput) (*QueryMemory
 func NewQueryMemoryTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"queryMemory",
-		`搜索你的记忆，找到相关的信息。可以查询关于某个话题、某个人、或者某次经历的记忆。
-
-【scoped 参数使用指南】
-- scoped=false（默认）：搜索所有会话的记忆，适合查找自身经历、过往事件等
-- scoped=true：只搜索当前会话的记忆
-`,
+		"搜索与当前聊天对象共同形成的长期记忆。不能搜索其他人的私聊。",
 		queryMemoryFunc,
 	)
 }

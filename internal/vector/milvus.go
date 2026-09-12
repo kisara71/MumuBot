@@ -26,15 +26,6 @@ type MilvusClient struct {
 	collectionName string
 }
 
-// MemoryVector 记忆向量结构
-type MemoryVector struct {
-	ID        int64     `json:"id"`
-	MemoryID  uint      `json:"memory_id"`
-	GroupID   int64     `json:"group_id"`
-	MemType   string    `json:"mem_type"`
-	Embedding []float32 `json:"embedding"`
-}
-
 // NewMilvusClient 创建 Milvus 客户端
 func NewMilvusClient(cfg *MilvusConfig) (*MilvusClient, error) {
 	if cfg.Address == "" {
@@ -44,7 +35,7 @@ func NewMilvusClient(cfg *MilvusConfig) (*MilvusClient, error) {
 		cfg.DBName = "default"
 	}
 	if cfg.CollectionName == "" {
-		cfg.CollectionName = "mumu_memories"
+		cfg.CollectionName = "luma_memories"
 	}
 	if cfg.VectorDim == 0 {
 		cfg.VectorDim = 1024
@@ -91,7 +82,7 @@ func (c *MilvusClient) initCollection(ctx context.Context) error {
 		// 创建集合
 		schema := entity.NewSchema().
 			WithName(c.collectionName).
-			WithDescription("Mumu bot memory vectors").
+			WithDescription("Luma private companion memory vectors").
 			WithField(entity.NewField().
 				WithName("id").
 				WithDataType(entity.FieldTypeInt64).
@@ -265,12 +256,12 @@ func (c *MilvusClient) Delete(ctx context.Context, memoryIDs []uint) error {
 	return nil
 }
 
-// DeleteByGroup 按群删除向量
+// DeleteByRef 按私聊会话删除向量。
 func (c *MilvusClient) DeleteByRef(ctx context.Context, refID string) error {
 	filter := fmt.Sprintf("conversation_id == %q", refID)
 	_, err := c.client.Delete(ctx, milvusclient.NewDeleteOption(c.collectionName).WithExpr(filter))
 	if err != nil {
-		return fmt.Errorf("按群删除向量失败: %w", err)
+		return fmt.Errorf("按会话删除向量失败: %w", err)
 	}
 	return nil
 }

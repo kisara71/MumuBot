@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 
-	mutils "mumu-bot/internal/utils"
+	mutils "github.com/kisara71/luma/internal/utils"
 
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/components/tool"
@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// ==================== 更新成员画像工具 ====================
+// ==================== 更新用户画像工具 ====================
 
 // mergeAndDeduplicateStrings 合并两个字符串切片并去重
 func mergeAndDeduplicateStrings(existing []string, newItems []string) []string {
@@ -37,10 +37,8 @@ func mergeAndDeduplicateStrings(existing []string, newItems []string) []string {
 	return result
 }
 
-// UpdateUserProfileInput 更新成员画像的输入参数
+// UpdateUserProfileInput 更新用户画像的输入参数
 type UpdateUserProfileInput struct {
-	// UserID 群友的QQ号
-	UserID int64 `json:"user_id" jsonschema:"description=群友/私聊对象的QQ号"`
 	// Alias 对对方的称呼/别名
 	Alias []string `json:"alias,omitempty" jsonschema:"description=你对对方的称呼、外号或约定别名（只传新增项）"`
 	// SpeakStyle 说话风格描述
@@ -59,26 +57,25 @@ type UpdateUserProfileInput struct {
 	RespectDelta float64 `json:"respect_delta,omitempty" jsonschema:"minimum=-0.3,maximum=0.3,description=认可度变化值(-0.3到0.3)"`
 }
 
-// UpdateMemberProfileOutput 更新成员画像的输出
-type UpdateMemberProfileOutput struct {
+// UpdateUserProfileOutput 更新用户画像的输出
+type UpdateUserProfileOutput struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
 
-// updateMemberProfileFunc 更新成员画像的实际实现
-func updateMemberProfileFunc(ctx context.Context, input *UpdateUserProfileInput) (*UpdateMemberProfileOutput, error) {
+// updateUserProfileFunc 更新用户画像的实际实现
+func updateUserProfileFunc(ctx context.Context, input *UpdateUserProfileInput) (*UpdateUserProfileOutput, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return &UpdateMemberProfileOutput{Success: false, Message: "工具上下文未初始化"}, nil
+		return &UpdateUserProfileOutput{Success: false, Message: "工具上下文未初始化"}, nil
 	}
 
-	if input.UserID == 0 {
-		return &UpdateMemberProfileOutput{Success: false, Message: "用户 ID 不能为空"}, nil
-	}
+	// Private-only: the model cannot select or mutate another user's profile.
+	userID := tc.SessionRef().UserID
 
-	profile, err := tc.MemoryMgr.GetMemberProfile(input.UserID)
+	profile, err := tc.MemoryMgr.GetUserProfile(userID)
 	if err != nil {
-		return &UpdateMemberProfileOutput{Success: false, Message: err.Error()}, nil
+		return &UpdateUserProfileOutput{Success: false, Message: err.Error()}, nil
 	}
 
 	if input.SpeakStyle != "" {
@@ -129,30 +126,28 @@ func updateMemberProfileFunc(ctx context.Context, input *UpdateUserProfileInput)
 	profile.Respect = mutils.ClampFloat64(profile.Respect+input.RespectDelta, 0, 1)
 
 	if err := tc.MemoryMgr.UpdateUserProfile(profile); err != nil {
-		return &UpdateMemberProfileOutput{Success: false, Message: err.Error()}, nil
+		return &UpdateUserProfileOutput{Success: false, Message: err.Error()}, nil
 	}
 
-	return &UpdateMemberProfileOutput{Success: true, Message: "已更新对该用户的了解"}, nil
+	return &UpdateUserProfileOutput{Success: true, Message: "已更新对该用户的了解"}, nil
 }
 
-// NewUpdateMemberProfileTool 创建更新成员画像工具
-func NewUpdateMemberProfileTool() (tool.InvokableTool, error) {
+// NewUpdateUserProfileTool 创建更新用户画像工具
+func NewUpdateUserProfileTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
-		"updateMemberProfile",
-		"更新你对某个群友/私聊对象的了解。当你发现群友/私聊对象的新特点、说话风格、兴趣爱好时使用。也可以根据互动情况调整亲密度。",
-		updateMemberProfileFunc,
+		"updateUserProfile",
+		"更新当前聊天对象的画像。当发现稳定的新特点、称呼或兴趣时使用；普通闲聊不要调用。user_id 会被系统绑定为当前对方。",
+		updateUserProfileFunc,
 	)
 }
 
-// ==================== 获取成员信息工具 ====================
+// ==================== 获取用户信息工具 ====================
 
-// GetUserInfoInput 获取成员信息的输入参数
+// GetUserInfoInput 获取用户信息的输入参数
 type GetUserInfoInput struct {
-	// UserID 群友的QQ号
-	UserID int64 `json:"user_id" jsonschema:"description=群友/私聊对象的QQ号"`
 }
 
-// GetUserInfoOutput 获取成员信息的输出
+// GetUserInfoOutput 获取用户信息的输出
 type GetUserInfoOutput struct {
 	Success     bool     `json:"success"`
 	Message     string   `json:"message,omitempty"`
@@ -169,18 +164,14 @@ type GetUserInfoOutput struct {
 	MsgCount    int      `json:"msg_count,omitempty"`
 }
 
-// getMemberInfoFunc 获取成员信息的实际实现
-func getMemberInfoFunc(ctx context.Context, input *GetUserInfoInput) (*GetUserInfoOutput, error) {
+// getUserInfoFunc 获取用户信息的实际实现
+func getUserInfoFunc(ctx context.Context, input *GetUserInfoInput) (*GetUserInfoOutput, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
 		return &GetUserInfoOutput{Success: false, Message: "工具上下文未初始化"}, nil
 	}
 
-	if input.UserID == 0 {
-		return &GetUserInfoOutput{Success: false, Message: "用户 ID 不能为空"}, nil
-	}
-
-	profile, err := tc.MemoryMgr.GetMemberProfile(input.UserID)
+	profile, err := tc.MemoryMgr.GetUserProfile(tc.SessionRef().UserID)
 	if err != nil {
 		return &GetUserInfoOutput{
 			Success: false,
@@ -221,11 +212,11 @@ func getMemberInfoFunc(ctx context.Context, input *GetUserInfoInput) (*GetUserIn
 	}, nil
 }
 
-// NewGetMemberInfoTool 创建获取成员信息工具
-func NewGetMemberInfoTool() (tool.InvokableTool, error) {
+// NewGetUserInfoTool 创建获取用户信息工具
+func NewGetUserInfoTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
-		"getMemberInfo",
-		"查看你对某个群友/私聊对象的了解。",
-		getMemberInfoFunc,
+		"getUserProfile",
+		"查看当前聊天对象的画像。user_id 会被系统绑定为当前对方。",
+		getUserInfoFunc,
 	)
 }

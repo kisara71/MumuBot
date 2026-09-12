@@ -8,7 +8,7 @@ on:
     branches: [ "main" ]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -19,31 +19,31 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            output_name: mumu-bot
-            asset_name: mumu-bot-linux-amd64
+            output_name: luma
+            asset_name: luma-linux-amd64
             archive_ext: .tar.gz
           - goos: windows
             goarch: amd64
-            output_name: mumu-bot.exe
-            asset_name: mumu-bot-windows-amd64
+            output_name: luma.exe
+            asset_name: luma-windows-amd64
             archive_ext: .zip
           - goos: darwin
             goarch: amd64
-            output_name: mumu-bot
-            asset_name: mumu-bot-darwin-amd64
+            output_name: luma
+            asset_name: luma-darwin-amd64
             archive_ext: .tar.gz
           - goos: darwin
             goarch: arm64
-            output_name: mumu-bot
-            asset_name: mumu-bot-darwin-arm64
+            output_name: luma
+            asset_name: luma-darwin-arm64
             archive_ext: .tar.gz
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@v7
       with:
         go-version-file: 'go.mod'
 
@@ -73,7 +73,7 @@ jobs:
         fi
 
     - name: Upload Artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.asset_name }}
         path: ${{ matrix.asset_name }}${{ matrix.archive_ext }}
@@ -83,9 +83,11 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true

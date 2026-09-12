@@ -3,8 +3,8 @@ package llm
 import (
 	"context"
 	"fmt"
-	"mumu-bot/internal/config"
-	"mumu-bot/internal/memory"
+	"github.com/kisara71/luma/internal/config"
+	"github.com/kisara71/luma/internal/memory"
 
 	"github.com/cloudwego/eino-ext/components/embedding/openai"
 )

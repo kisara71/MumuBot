@@ -1,35 +1,23 @@
 package prompt
 
 import (
-	"mumu-bot/internal/memory"
-	"mumu-bot/internal/session"
+	"github.com/kisara71/luma/internal/memory"
 )
 
 type MoodInfo struct {
-	Valence     float64
-	Energy      float64
-	Sociability float64
-	Irritation  float64
-	Curiosity   float64
+	Valence, Energy, Sociability, Irritation, Curiosity float64
 }
 
 type Context struct {
-	Ref                   session.Ref
-	MoodState             *MoodInfo
-	JargonMatches         map[string]string
-	GroupInfo             string
-	PeerInfo              string
-	LoopInfo              string
-	RelatedMemories       []memory.Memory
-	CrossGroupExperiences []memory.Memory
-	StyleHints            []string
+	MoodState       *MoodInfo
+	PeerInfo        string
+	ProactiveInfo   string
+	RelatedMemories []memory.Memory
 }
 
 type BuildInput struct {
-	Context        *Context
-	IsFirstPrivate bool
-	ChatContext    string
-	ExtraPrompt    string
-	RecentPeople   string
-	IsMention      bool
+	Context     *Context
+	IsFirst     bool
+	ChatContext string
+	ExtraPrompt string
 }

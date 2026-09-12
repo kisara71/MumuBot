@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+config/config.yaml
+config/mcp.json
+data
+logs
+stickers
+*.db
+*.log
+*.exe
+dist
+
